@@ -15,7 +15,7 @@ html, body {
 
 .widget {
   padding: 3.5vw 5vw;
-  border-radius: 3.5vw;
+  border-radius: 8px;
   color: rgba(255, 255, 255, 0.92);
   width: 100%;
   height: 100%;
@@ -59,7 +59,7 @@ html, body {
   min-height: 6px;
   flex: 1;
   max-height: 20px;
-  border-radius: 1.2vw;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
 }
@@ -70,7 +70,7 @@ html, body {
   top: 0;
   left: 0;
   height: 100%;
-  border-radius: 1.2vw;
+  border-radius: 6px;
   transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1),
               background 0.5s ease;
 }
