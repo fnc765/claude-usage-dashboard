@@ -17,7 +17,7 @@
         "title": "Claude Code Usage",
         "width": 320,
         "height": 150,
-        "resizable": false,
+        "resizable": true,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
