@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Code Usage</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div class="widget" data-tauri-drag-region>
+      <div class="widget-header" data-tauri-drag-region>
+        <span class="widget-title">Claude Code Usage</span>
+      </div>
+
+      <div class="meter-section">
+        <div class="meter-label">Current Session</div>
+        <div class="bar-track">
+          <div class="bar-time" id="session-time-bar"></div>
+          <div class="bar-usage" id="session-usage-bar"></div>
+        </div>
+        <div class="meter-detail" id="session-detail">-- used</div>
+      </div>
+
+      <div class="meter-section">
+        <div class="meter-label">Weekly Limit</div>
+        <div class="bar-track">
+          <div class="bar-time" id="weekly-time-bar"></div>
+          <div class="bar-usage" id="weekly-usage-bar"></div>
+        </div>
+        <div class="meter-detail" id="weekly-detail">-- used</div>
+      </div>
+    </div>
+  </body>
+</html>

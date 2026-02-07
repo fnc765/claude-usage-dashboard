@@ -1,0 +1,111 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Segoe UI', Inter, -apple-system, sans-serif;
+  user-select: none;
+}
+
+.widget {
+  padding: 12px 16px;
+  border-radius: 12px;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.widget-header {
+  margin-bottom: 10px;
+}
+
+.widget-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  opacity: 0.85;
+}
+
+.meter-section {
+  margin-bottom: 8px;
+}
+
+.meter-section:last-child {
+  margin-bottom: 0;
+}
+
+.meter-label {
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.7;
+  margin-bottom: 3px;
+}
+
+.bar-track {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.bar-time,
+.bar-usage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1),
+              background 0.5s ease;
+}
+
+.bar-time {
+  z-index: 1;
+  background: #93C5FD;
+}
+
+.bar-usage {
+  z-index: 2;
+  background: linear-gradient(90deg, #3B82F6, #2563EB);
+}
+
+/* Weekly colors */
+.meter-section:nth-child(3) .bar-time {
+  background: #C4B5FD;
+}
+
+.meter-section:nth-child(3) .bar-usage {
+  background: linear-gradient(90deg, #8B5CF6, #7C3AED);
+}
+
+/* Warning state (60-80%) */
+.bar-usage.warning {
+  background: linear-gradient(90deg, #F59E0B, #D97706);
+}
+
+.bar-time.warning {
+  background: #FCD34D;
+}
+
+/* Critical state (80-100%) */
+.bar-usage.critical {
+  background: linear-gradient(90deg, #EF4444, #DC2626);
+}
+
+.bar-time.critical {
+  background: #FCA5A5;
+}
+
+.meter-detail {
+  font-size: 9px;
+  opacity: 0.55;
+  margin-top: 2px;
+  transition: opacity 0.2s ease;
+}
+
+.widget:hover .meter-detail {
+  opacity: 0.85;
+}
