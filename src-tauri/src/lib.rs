@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
-use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use tokio::sync::{watch, Mutex, Notify};
+use tokio::time::Duration;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +37,11 @@ struct UsageData {
 
 struct AppState {
     latest_usage: Option<UsageData>,
+}
+
+struct PollingControl {
+    interval_tx: watch::Sender<u64>,
+    refresh_notify: Notify,
 }
 
 fn credentials_path() -> PathBuf {
@@ -83,20 +88,83 @@ async fn get_usage(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<Usag
         .ok_or_else(|| "No usage data available yet".to_string())
 }
 
+#[tauri::command]
+fn set_background_effect(window: tauri::WebviewWindow, effect: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use window_vibrancy::{apply_acrylic, apply_mica, clear_acrylic, clear_mica};
+
+        let _ = clear_mica(&window);
+        let _ = clear_acrylic(&window);
+
+        match effect.as_str() {
+            "transparent" => Ok(()),
+            "mica" => apply_mica(&window, Some(true))
+                .map_err(|e| format!("Failed to apply mica: {}", e)),
+            "acrylic" => apply_acrylic(&window, Some((18, 18, 18, 200)))
+                .map_err(|e| format!("Failed to apply acrylic: {}", e)),
+            _ => Err(format!("Unknown effect: {}", effect)),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = effect;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn set_always_on_top(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    window
+        .set_always_on_top(enabled)
+        .map_err(|e| format!("Failed to set always on top: {}", e))
+}
+
+#[tauri::command]
+fn force_refresh(control: tauri::State<'_, Arc<PollingControl>>) -> Result<(), String> {
+    control.refresh_notify.notify_one();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_polling_interval(
+    control: tauri::State<'_, Arc<PollingControl>>,
+    seconds: u64,
+) -> Result<(), String> {
+    control
+        .interval_tx
+        .send(seconds)
+        .map_err(|e| format!("Failed to set interval: {}", e))
+}
+
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let (interval_tx, interval_rx) = watch::channel(60u64);
+    let polling_control = Arc::new(PollingControl {
+        interval_tx,
+        refresh_notify: Notify::new(),
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(Mutex::new(AppState {
             latest_usage: None,
         })))
-        .setup(|app| {
+        .manage(Arc::clone(&polling_control))
+        .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 
             #[cfg(target_os = "windows")]
             {
-                use window_vibrancy::apply_acrylic;
-                let _ = apply_acrylic(&window, Some((18, 18, 18, 200)));
+                use window_vibrancy::{apply_acrylic, apply_mica};
+                if apply_mica(&window, Some(true)).is_err() {
+                    let _ = apply_acrylic(&window, Some((18, 18, 18, 200)));
+                }
             }
 
             // System tray
@@ -125,8 +193,11 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Start polling (fetch immediately, then every 60s)
+            // Start dynamic polling loop
             let app_handle = app.handle().clone();
+            let pc = polling_control;
+            let mut interval_rx = interval_rx;
+
             tauri::async_runtime::spawn(async move {
                 async fn do_fetch(app_handle: &tauri::AppHandle) {
                     let token = match read_access_token() {
@@ -155,17 +226,34 @@ pub fn run() {
                 // Immediate first fetch
                 do_fetch(&app_handle).await;
 
-                // Then poll every 60s
-                let mut ticker = interval(Duration::from_secs(60));
+                // Dynamic polling loop
                 loop {
-                    ticker.tick().await;
-                    do_fetch(&app_handle).await;
+                    let secs = *interval_rx.borrow();
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(secs)) => {
+                            do_fetch(&app_handle).await;
+                        }
+                        _ = pc.refresh_notify.notified() => {
+                            do_fetch(&app_handle).await;
+                        }
+                        Ok(_) = interval_rx.changed() => {
+                            continue;
+                        }
+                    }
                 }
             });
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_usage])
+        .invoke_handler(tauri::generate_handler![
+            get_usage,
+            set_background_effect,
+            set_always_on_top,
+            force_refresh,
+            set_polling_interval,
+            quit_app,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

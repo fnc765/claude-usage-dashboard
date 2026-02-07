@@ -32,5 +32,63 @@
         <div class="meter-detail" id="weekly-detail">-- used</div>
       </div>
     </div>
+
+    <div id="context-menu" class="context-menu">
+      <div class="menu-section">
+        <label class="menu-label">
+          Opacity
+          <span id="opacity-value">75%</span>
+        </label>
+        <input
+          type="range"
+          id="opacity-slider"
+          min="10"
+          max="100"
+          value="75"
+          class="menu-slider"
+        />
+      </div>
+
+      <div class="menu-divider"></div>
+
+      <div class="menu-section">
+        <label class="menu-label">Background</label>
+        <div class="menu-btn-group" id="bg-effect-group">
+          <button class="menu-seg-btn" data-effect="transparent">Transparent</button>
+          <button class="menu-seg-btn active" data-effect="mica">Mica</button>
+          <button class="menu-seg-btn" data-effect="acrylic">Acrylic</button>
+        </div>
+      </div>
+
+      <div class="menu-divider"></div>
+
+      <button class="menu-item" id="toggle-aot">
+        <span class="menu-check" id="aot-check">&#10003;</span>
+        Always on Top
+      </button>
+
+      <div class="menu-divider"></div>
+
+      <div class="menu-section">
+        <label class="menu-label">Polling Interval</label>
+        <div class="menu-btn-group" id="poll-group">
+          <button class="menu-seg-btn" data-interval="30">30s</button>
+          <button class="menu-seg-btn active" data-interval="60">60s</button>
+          <button class="menu-seg-btn" data-interval="120">2m</button>
+          <button class="menu-seg-btn" data-interval="300">5m</button>
+        </div>
+      </div>
+
+      <div class="menu-divider"></div>
+
+      <button class="menu-item" id="force-refresh">
+        <span class="menu-icon">&#8635;</span>
+        Refresh Now
+      </button>
+      <button class="menu-item menu-item-danger" id="quit-app">
+        <span class="menu-icon">&#10005;</span>
+        Quit
+      </button>
+    </div>
   </body>
 </html>
