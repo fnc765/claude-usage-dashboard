@@ -16,6 +16,12 @@ const DEFAULTS: Settings = {
   pollingInterval: 60,
 };
 
+function getEl(id: string): HTMLElement {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`Required DOM element #${id} not found`);
+  return el;
+}
+
 function loadSettings(): Settings {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (raw) {
@@ -61,54 +67,61 @@ async function applyAllSettings(settings: Settings): Promise<void> {
   }
 }
 
-function showMenu(x: number, y: number): void {
-  const menu = document.getElementById("context-menu")!;
-  menu.style.display = "block";
-
-  requestAnimationFrame(() => {
-    const rect = menu.getBoundingClientRect();
-    const maxX = window.innerWidth - rect.width - 4;
-    const maxY = window.innerHeight - rect.height - 4;
-
-    menu.style.left = `${Math.max(4, Math.min(x, maxX))}px`;
-    menu.style.top = `${Math.max(4, Math.min(y, maxY))}px`;
-  });
-}
-
-function hideMenu(): void {
-  document.getElementById("context-menu")!.style.display = "none";
-}
-
-function isMenuVisible(): boolean {
-  return document.getElementById("context-menu")!.style.display !== "none";
-}
-
-function syncMenuUI(settings: Settings): void {
-  const slider = document.getElementById("opacity-slider") as HTMLInputElement;
-  slider.value = String(settings.opacity);
-  document.getElementById("opacity-value")!.textContent = `${settings.opacity}%`;
-
-  document.querySelectorAll<HTMLElement>("[data-effect]").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.effect === settings.bgEffect);
-  });
-
-  document.getElementById("aot-check")!.textContent = settings.alwaysOnTop
-    ? "\u2713"
-    : "";
-
-  document.querySelectorAll<HTMLElement>("[data-interval]").forEach((btn) => {
-    btn.classList.toggle(
-      "active",
-      parseInt(btn.dataset.interval!) === settings.pollingInterval,
-    );
-  });
-}
-
 export function initContextMenu(): void {
   const settings = loadSettings();
 
+  // Cache DOM elements
+  const menu = getEl("context-menu");
+  const opacitySlider = getEl("opacity-slider") as HTMLInputElement;
+  const opacityValue = getEl("opacity-value");
+  const aotCheck = getEl("aot-check");
+  const toggleAot = getEl("toggle-aot");
+  const forceRefresh = getEl("force-refresh");
+  const quitApp = getEl("quit-app");
+
+  function showMenu(x: number, y: number): void {
+    menu.style.visibility = "hidden";
+    menu.style.display = "block";
+
+    requestAnimationFrame(() => {
+      const rect = menu.getBoundingClientRect();
+      const maxX = window.innerWidth - rect.width - 4;
+      const maxY = window.innerHeight - rect.height - 4;
+
+      menu.style.left = `${Math.max(4, Math.min(x, maxX))}px`;
+      menu.style.top = `${Math.max(4, Math.min(y, maxY))}px`;
+      menu.style.visibility = "visible";
+    });
+  }
+
+  function hideMenu(): void {
+    menu.style.display = "none";
+  }
+
+  function isMenuVisible(): boolean {
+    return menu.style.display !== "none";
+  }
+
+  function syncMenuUI(): void {
+    opacitySlider.value = String(settings.opacity);
+    opacityValue.textContent = `${settings.opacity}%`;
+
+    document.querySelectorAll<HTMLElement>("[data-effect]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.effect === settings.bgEffect);
+    });
+
+    aotCheck.textContent = settings.alwaysOnTop ? "\u2713" : "";
+
+    document.querySelectorAll<HTMLElement>("[data-interval]").forEach((btn) => {
+      btn.classList.toggle(
+        "active",
+        parseInt(btn.dataset.interval!) === settings.pollingInterval,
+      );
+    });
+  }
+
   applyAllSettings(settings);
-  syncMenuUI(settings);
+  syncMenuUI();
 
   // Right-click to open
   document.addEventListener("contextmenu", (e) => {
@@ -116,17 +129,14 @@ export function initContextMenu(): void {
     if (isMenuVisible()) {
       hideMenu();
     } else {
-      syncMenuUI(settings);
+      syncMenuUI();
       showMenu(e.clientX, e.clientY);
     }
   });
 
   // Click outside to close
   document.addEventListener("mousedown", (e) => {
-    if (
-      isMenuVisible() &&
-      !document.getElementById("context-menu")!.contains(e.target as Node)
-    ) {
+    if (isMenuVisible() && !menu.contains(e.target as Node)) {
       hideMenu();
     }
   });
@@ -139,12 +149,9 @@ export function initContextMenu(): void {
   });
 
   // Opacity slider
-  const opacitySlider = document.getElementById(
-    "opacity-slider",
-  ) as HTMLInputElement;
   opacitySlider.addEventListener("input", () => {
     const val = parseInt(opacitySlider.value);
-    document.getElementById("opacity-value")!.textContent = `${val}%`;
+    opacityValue.textContent = `${val}%`;
     applyOpacity(val);
     settings.opacity = val;
     saveSettings(settings);
@@ -160,18 +167,24 @@ export function initContextMenu(): void {
       btn.classList.add("active");
       settings.bgEffect = effect;
       saveSettings(settings);
-      await invoke("set_background_effect", { effect });
+      try {
+        await invoke("set_background_effect", { effect });
+      } catch (e) {
+        console.warn("Failed to set background effect:", e);
+      }
     });
   });
 
   // Always on top toggle
-  document.getElementById("toggle-aot")!.addEventListener("click", async () => {
+  toggleAot.addEventListener("click", async () => {
     settings.alwaysOnTop = !settings.alwaysOnTop;
     saveSettings(settings);
-    document.getElementById("aot-check")!.textContent = settings.alwaysOnTop
-      ? "\u2713"
-      : "";
-    await invoke("set_always_on_top", { enabled: settings.alwaysOnTop });
+    aotCheck.textContent = settings.alwaysOnTop ? "\u2713" : "";
+    try {
+      await invoke("set_always_on_top", { enabled: settings.alwaysOnTop });
+    } catch (e) {
+      console.warn("Failed to set always on top:", e);
+    }
   });
 
   // Polling interval buttons
@@ -184,20 +197,30 @@ export function initContextMenu(): void {
       btn.classList.add("active");
       settings.pollingInterval = seconds;
       saveSettings(settings);
-      await invoke("set_polling_interval", { seconds });
+      try {
+        await invoke("set_polling_interval", { seconds });
+      } catch (e) {
+        console.warn("Failed to set polling interval:", e);
+      }
     });
   });
 
   // Force refresh
-  document
-    .getElementById("force-refresh")!
-    .addEventListener("click", async () => {
+  forceRefresh.addEventListener("click", async () => {
+    try {
       await invoke("force_refresh");
-      hideMenu();
-    });
+    } catch (e) {
+      console.warn("Failed to force refresh:", e);
+    }
+    hideMenu();
+  });
 
   // Quit
-  document.getElementById("quit-app")!.addEventListener("click", async () => {
-    await invoke("quit_app");
+  quitApp.addEventListener("click", async () => {
+    try {
+      await invoke("quit_app");
+    } catch (e) {
+      console.warn("Failed to quit app:", e);
+    }
   });
 }

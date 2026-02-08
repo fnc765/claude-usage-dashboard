@@ -57,6 +57,7 @@ struct UsageData {
 
 struct AppState {
     latest_usage: Option<UsageData>,
+    http_client: reqwest::Client,
 }
 
 struct PollingControl {
@@ -64,9 +65,9 @@ struct PollingControl {
     refresh_notify: Notify,
 }
 
-fn credentials_path() -> PathBuf {
-    let home = dirs::home_dir().expect("Could not find home directory");
-    home.join(".claude").join(".credentials.json")
+fn credentials_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "Could not find home directory".to_string())?;
+    Ok(home.join(".claude").join(".credentials.json"))
 }
 
 struct TokenInfo {
@@ -75,7 +76,7 @@ struct TokenInfo {
 }
 
 fn read_token_info() -> Result<TokenInfo, String> {
-    let path = credentials_path();
+    let path = credentials_path()?;
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read credentials: {}", e))?;
     let creds: Credentials = serde_json::from_str(&content)
@@ -89,13 +90,12 @@ fn read_token_info() -> Result<TokenInfo, String> {
 fn is_token_expired(expires_at: u64) -> bool {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64;
     now_ms + 30_000 >= expires_at
 }
 
-async fn fetch_usage(token: &str) -> Result<UsageData, String> {
-    let client = reqwest::Client::new();
+async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageData, String> {
     let resp = client
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", format!("Bearer {}", token))
@@ -104,7 +104,10 @@ async fn fetch_usage(token: &str) -> Result<UsageData, String> {
         .header("anthropic-beta", "oauth-2025-04-20")
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
+        .map_err(|e| {
+            // Avoid leaking token through reqwest error details
+            format!("HTTP request failed: {}", e.without_url())
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -117,12 +120,9 @@ async fn fetch_usage(token: &str) -> Result<UsageData, String> {
         .await
         .map_err(|e| format!("Failed to read response body: {}", e))?;
 
+    let truncated: String = body.chars().take(500).collect();
     serde_json::from_str::<UsageData>(&body).map_err(|e| {
-        format!(
-            "Failed to parse response: {}. Body: {}",
-            e,
-            &body[..body.len().min(500)]
-        )
+        format!("Failed to parse response: {}. Body: {}", e, truncated)
     })
 }
 
@@ -178,6 +178,9 @@ fn set_polling_interval(
     control: tauri::State<'_, Arc<PollingControl>>,
     seconds: u64,
 ) -> Result<(), String> {
+    if seconds < 10 || seconds > 600 {
+        return Err("Polling interval must be between 10 and 600 seconds".to_string());
+    }
     control
         .interval_tx
         .send(seconds)
@@ -201,10 +204,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(Mutex::new(AppState {
             latest_usage: None,
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("Failed to build HTTP client"),
         })))
         .manage(Arc::clone(&polling_control))
         .setup(move |app| {
-            let window = app.get_webview_window("main").unwrap();
+            let window = app
+                .get_webview_window("main")
+                .ok_or("Main window not found")?;
 
             #[cfg(target_os = "windows")]
             {
@@ -220,7 +229,11 @@ pub fn run() {
             let menu = MenuBuilder::new(app).items(&[&toggle, &quit]).build()?;
 
             TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(
+                    app.default_window_icon()
+                        .ok_or("Default window icon not found")?
+                        .clone(),
+                )
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "toggle" => {
@@ -262,15 +275,19 @@ pub fn run() {
                         return;
                     }
 
-                    match fetch_usage(&token_info.access_token).await {
+                    let client = {
+                        let state = app_handle.state::<Arc<Mutex<AppState>>>();
+                        let s = state.lock().await;
+                        s.http_client.clone()
+                    };
+
+                    match fetch_usage(&client, &token_info.access_token).await {
                         Ok(data) => {
-                            let state = app_handle.state::<Arc<Mutex<AppState>>>();
-                            {
-                                let mut s = state.lock().await;
-                                s.latest_usage = Some(data.clone());
-                            }
                             let _ = app_handle.emit("usage-update", &data);
                             let _ = app_handle.emit("token-status", "ok");
+                            let state = app_handle.state::<Arc<Mutex<AppState>>>();
+                            let mut s = state.lock().await;
+                            s.latest_usage = Some(data);
                         }
                         Err(e) => {
                             eprintln!("Usage fetch error: {}", e);

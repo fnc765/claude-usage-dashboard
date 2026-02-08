@@ -37,6 +37,7 @@ function getThresholdClass(percent: number): string {
 function formatRemaining(resetsAt: string | null): string {
   if (!resetsAt) return "";
   const reset = new Date(resetsAt);
+  if (isNaN(reset.getTime())) return "";
   const now = new Date();
   const diffMs = reset.getTime() - now.getTime();
 
@@ -55,6 +56,7 @@ function formatRemaining(resetsAt: string | null): string {
 function formatResetTime(resetsAt: string | null): string {
   if (!resetsAt) return "";
   const reset = new Date(resetsAt);
+  if (isNaN(reset.getTime())) return "";
   const now = new Date();
   const diffMs = reset.getTime() - now.getTime();
 
@@ -69,12 +71,15 @@ function formatResetTime(resetsAt: string | null): string {
 
 export function isExpired(resetsAt: string | null): boolean {
   if (!resetsAt) return true;
-  return new Date(resetsAt).getTime() - Date.now() <= 0;
+  const time = new Date(resetsAt).getTime();
+  if (isNaN(time)) return true;
+  return time - Date.now() <= 0;
 }
 
 function calcTimeElapsedPercent(resetsAt: string | null, windowHours: number): number {
   if (!resetsAt) return 0;
   const reset = new Date(resetsAt);
+  if (isNaN(reset.getTime())) return 0;
   const now = new Date();
   const remainMs = reset.getTime() - now.getTime();
   const totalMs = windowHours * 3600000;
@@ -138,19 +143,25 @@ function updateBar(
     `${Math.round(usagePercent)}% used${excessSuffix}  ·  Reset ${resetTimeStr} (${remainStr})`;
 }
 
+function getElement(id: string): HTMLElement {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`Required DOM element #${id} not found`);
+  return el;
+}
+
 export function updateWidget(data: UsageData) {
   const sessionElements: BarElements = {
-    usageBar: document.getElementById("session-usage-bar")!,
-    timeBar: document.getElementById("session-time-bar")!,
-    excessBar: document.getElementById("session-excess-bar")!,
-    detail: document.getElementById("session-detail")!,
+    usageBar: getElement("session-usage-bar"),
+    timeBar: getElement("session-time-bar"),
+    excessBar: getElement("session-excess-bar"),
+    detail: getElement("session-detail"),
   };
 
   const weeklyElements: BarElements = {
-    usageBar: document.getElementById("weekly-usage-bar")!,
-    timeBar: document.getElementById("weekly-time-bar")!,
-    excessBar: document.getElementById("weekly-excess-bar")!,
-    detail: document.getElementById("weekly-detail")!,
+    usageBar: getElement("weekly-usage-bar"),
+    timeBar: getElement("weekly-time-bar"),
+    excessBar: getElement("weekly-excess-bar"),
+    detail: getElement("weekly-detail"),
   };
 
   const sessionTimePercent = calcTimeElapsedPercent(data.five_hour.resets_at, 5);
