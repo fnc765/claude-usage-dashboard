@@ -41,6 +41,30 @@ window.addEventListener("DOMContentLoaded", async () => {
     updateWidget(event.payload);
   });
 
+  await listen<string>("token-status", (event) => {
+    const statusEl = document.getElementById("token-status");
+    if (!statusEl) return;
+
+    switch (event.payload) {
+      case "expired":
+        statusEl.textContent = "Token expired";
+        statusEl.className = "token-status error";
+        break;
+      case "error":
+        statusEl.textContent = "Credentials not found";
+        statusEl.className = "token-status error";
+        break;
+      case "fetch_error":
+        statusEl.textContent = "Fetch error";
+        statusEl.className = "token-status warning";
+        break;
+      case "ok":
+        statusEl.textContent = "";
+        statusEl.className = "token-status";
+        break;
+    }
+  });
+
   await fetchInitialData();
 
   setInterval(() => {

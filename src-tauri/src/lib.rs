@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
@@ -19,20 +20,39 @@ struct OAuthCredentials {
     access_token: String,
     #[allow(dead_code)]
     refresh_token: String,
-    #[allow(dead_code)]
     expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageMeter {
     utilization: f64,
-    resets_at: String,
+    resets_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExtraUsage {
+    is_enabled: bool,
+    monthly_limit: f64,
+    used_credits: f64,
+    utilization: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageData {
     five_hour: UsageMeter,
     seven_day: UsageMeter,
+    #[serde(default)]
+    seven_day_oauth_apps: Option<UsageMeter>,
+    #[serde(default)]
+    seven_day_opus: Option<UsageMeter>,
+    #[serde(default)]
+    seven_day_sonnet: Option<UsageMeter>,
+    #[serde(default)]
+    seven_day_cowork: Option<UsageMeter>,
+    #[serde(default)]
+    iguana_necktie: Option<serde_json::Value>,
+    #[serde(default)]
+    extra_usage: Option<ExtraUsage>,
 }
 
 struct AppState {
@@ -49,13 +69,29 @@ fn credentials_path() -> PathBuf {
     home.join(".claude").join(".credentials.json")
 }
 
-fn read_access_token() -> Result<String, String> {
+struct TokenInfo {
+    access_token: String,
+    expires_at: u64,
+}
+
+fn read_token_info() -> Result<TokenInfo, String> {
     let path = credentials_path();
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read credentials: {}", e))?;
     let creds: Credentials = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse credentials: {}", e))?;
-    Ok(creds.claude_ai_oauth.access_token)
+    Ok(TokenInfo {
+        access_token: creds.claude_ai_oauth.access_token,
+        expires_at: creds.claude_ai_oauth.expires_at,
+    })
+}
+
+fn is_token_expired(expires_at: u64) -> bool {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    now_ms + 30_000 >= expires_at
 }
 
 async fn fetch_usage(token: &str) -> Result<UsageData, String> {
@@ -70,13 +106,24 @@ async fn fetch_usage(token: &str) -> Result<UsageData, String> {
         .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
-    if !resp.status().is_success() {
-        return Err(format!("API returned status: {}", resp.status()));
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".into());
+        return Err(format!("API returned status {}: {}", status, body));
     }
 
-    resp.json::<UsageData>()
+    let body = resp
+        .text()
         .await
-        .map_err(|e| format!("Failed to parse response: {}", e))
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    serde_json::from_str::<UsageData>(&body).map_err(|e| {
+        format!(
+            "Failed to parse response: {}. Body: {}",
+            e,
+            &body[..body.len().min(500)]
+        )
+    })
 }
 
 #[tauri::command]
@@ -200,15 +247,22 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 async fn do_fetch(app_handle: &tauri::AppHandle) {
-                    let token = match read_access_token() {
+                    let token_info = match read_token_info() {
                         Ok(t) => t,
                         Err(e) => {
                             eprintln!("Token error: {}", e);
+                            let _ = app_handle.emit("token-status", "error");
                             return;
                         }
                     };
 
-                    match fetch_usage(&token).await {
+                    if is_token_expired(token_info.expires_at) {
+                        eprintln!("Access token expired. Run Claude Code to refresh.");
+                        let _ = app_handle.emit("token-status", "expired");
+                        return;
+                    }
+
+                    match fetch_usage(&token_info.access_token).await {
                         Ok(data) => {
                             let state = app_handle.state::<Arc<Mutex<AppState>>>();
                             {
@@ -216,9 +270,11 @@ pub fn run() {
                                 s.latest_usage = Some(data.clone());
                             }
                             let _ = app_handle.emit("usage-update", &data);
+                            let _ = app_handle.emit("token-status", "ok");
                         }
                         Err(e) => {
                             eprintln!("Usage fetch error: {}", e);
+                            let _ = app_handle.emit("token-status", "fetch_error");
                         }
                     }
                 }

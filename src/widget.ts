@@ -1,6 +1,24 @@
+export interface UsageMeter {
+  utilization: number;
+  resets_at: string | null;
+}
+
+export interface ExtraUsage {
+  is_enabled: boolean;
+  monthly_limit: number;
+  used_credits: number;
+  utilization: number;
+}
+
 export interface UsageData {
-  five_hour: { utilization: number; resets_at: string };
-  seven_day: { utilization: number; resets_at: string };
+  five_hour: UsageMeter;
+  seven_day: UsageMeter;
+  seven_day_oauth_apps?: UsageMeter | null;
+  seven_day_opus?: UsageMeter | null;
+  seven_day_sonnet?: UsageMeter | null;
+  seven_day_cowork?: UsageMeter | null;
+  iguana_necktie?: unknown;
+  extra_usage?: ExtraUsage | null;
 }
 
 interface BarElements {
@@ -16,7 +34,8 @@ function getThresholdClass(percent: number): string {
   return "";
 }
 
-function formatRemaining(resetsAt: string): string {
+function formatRemaining(resetsAt: string | null): string {
+  if (!resetsAt) return "";
   const reset = new Date(resetsAt);
   const now = new Date();
   const diffMs = reset.getTime() - now.getTime();
@@ -33,7 +52,8 @@ function formatRemaining(resetsAt: string): string {
   return `${minutes}m`;
 }
 
-function formatResetTime(resetsAt: string): string {
+function formatResetTime(resetsAt: string | null): string {
+  if (!resetsAt) return "";
   const reset = new Date(resetsAt);
   const now = new Date();
   const diffMs = reset.getTime() - now.getTime();
@@ -47,11 +67,13 @@ function formatResetTime(resetsAt: string): string {
   return reset.toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" });
 }
 
-export function isExpired(resetsAt: string): boolean {
+export function isExpired(resetsAt: string | null): boolean {
+  if (!resetsAt) return true;
   return new Date(resetsAt).getTime() - Date.now() <= 0;
 }
 
-function calcTimeElapsedPercent(resetsAt: string, windowHours: number): number {
+function calcTimeElapsedPercent(resetsAt: string | null, windowHours: number): number {
+  if (!resetsAt) return 0;
   const reset = new Date(resetsAt);
   const now = new Date();
   const remainMs = reset.getTime() - now.getTime();
@@ -64,7 +86,7 @@ function updateBar(
   elements: BarElements,
   usagePercent: number,
   timePercent: number,
-  resetsAt: string,
+  resetsAt: string | null,
   inactiveLabel: string,
 ) {
   if (isExpired(resetsAt)) {
