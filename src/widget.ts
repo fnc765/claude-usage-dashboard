@@ -46,6 +46,10 @@ function formatResetTime(resetsAt: string): string {
   return reset.toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" });
 }
 
+export function isExpired(resetsAt: string): boolean {
+  return new Date(resetsAt).getTime() - Date.now() <= 0;
+}
+
 function calcTimeElapsedPercent(resetsAt: string, windowHours: number): number {
   const reset = new Date(resetsAt);
   const now = new Date();
@@ -60,7 +64,17 @@ function updateBar(
   usagePercent: number,
   timePercent: number,
   resetsAt: string,
+  inactiveLabel: string,
 ) {
+  if (isExpired(resetsAt)) {
+    elements.usageBar.style.width = "0%";
+    elements.timeBar.style.width = "0%";
+    elements.usageBar.className = "bar-usage";
+    elements.timeBar.className = "bar-time";
+    elements.detail.textContent = inactiveLabel;
+    return;
+  }
+
   const cls = getThresholdClass(usagePercent);
 
   elements.usageBar.style.width = `${usagePercent}%`;
@@ -96,6 +110,7 @@ export function updateWidget(data: UsageData) {
     data.five_hour.utilization,
     sessionTimePercent,
     data.five_hour.resets_at,
+    "No active session",
   );
 
   updateBar(
@@ -103,5 +118,6 @@ export function updateWidget(data: UsageData) {
     data.seven_day.utilization,
     weeklyTimePercent,
     data.seven_day.resets_at,
+    "Awaiting reset",
   );
 }
