@@ -6,6 +6,8 @@ Claude Code の API 使用量をリアルタイムで監視するデスクトッ
 ![Rust](https://img.shields.io/badge/Rust-2021-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+![Usage Dashboard Screenshot](./image.png)
+
 ## 機能
 
 - **セッション使用量** (5時間枠) と **週間使用量** (7日枠) をプログレスバーで表示
