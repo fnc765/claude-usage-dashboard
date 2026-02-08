@@ -65,14 +65,17 @@ html, body {
 }
 
 .bar-time,
-.bar-usage {
+.bar-usage,
+.bar-excess {
   position: absolute;
   top: 0;
   left: 0;
   height: 100%;
   border-radius: 6px;
   transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1),
-              background 0.5s ease;
+              left 0.8s cubic-bezier(0.4, 0, 0.2, 1),
+              background 0.5s ease,
+              opacity 0.3s ease;
 }
 
 .bar-time {
@@ -83,6 +86,15 @@ html, body {
 .bar-usage {
   z-index: 2;
   background: linear-gradient(90deg, #3B82F6, #2563EB);
+}
+
+.bar-excess {
+  z-index: 3;
+  border-radius: 0 6px 6px 0;
+  background: linear-gradient(90deg, #FB923C, #EA580C);
+  border-left: 2px solid rgba(255, 255, 255, 0.4);
+  opacity: 0;
+  width: 0%;
 }
 
 /* Weekly colors */
@@ -103,6 +115,10 @@ html, body {
   background: #FCD34D;
 }
 
+.bar-excess.warning {
+  background: linear-gradient(90deg, #F59E0B, #B45309);
+}
+
 /* Critical state (80-100%) */
 .bar-usage.critical {
   background: linear-gradient(90deg, #EF4444, #DC2626);
@@ -110,6 +126,10 @@ html, body {
 
 .bar-time.critical {
   background: #FCA5A5;
+}
+
+.bar-excess.critical {
+  background: linear-gradient(90deg, #EF4444, #991B1B);
 }
 
 .meter-detail {

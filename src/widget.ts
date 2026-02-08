@@ -6,6 +6,7 @@ export interface UsageData {
 interface BarElements {
   usageBar: HTMLElement;
   timeBar: HTMLElement;
+  excessBar: HTMLElement;
   detail: HTMLElement;
 }
 
@@ -69,36 +70,64 @@ function updateBar(
   if (isExpired(resetsAt)) {
     elements.usageBar.style.width = "0%";
     elements.timeBar.style.width = "0%";
+    elements.excessBar.style.width = "0%";
+    elements.excessBar.style.left = "0%";
+    elements.excessBar.style.opacity = "0";
     elements.usageBar.className = "bar-usage";
     elements.timeBar.className = "bar-time";
+    elements.excessBar.className = "bar-excess";
     elements.detail.textContent = inactiveLabel;
     return;
   }
 
   const cls = getThresholdClass(usagePercent);
+  const isOverpace = usagePercent > timePercent;
 
-  elements.usageBar.style.width = `${usagePercent}%`;
   elements.timeBar.style.width = `${timePercent}%`;
+  elements.timeBar.className = "bar-time" + (cls ? ` ${cls}` : "");
+
+  if (isOverpace) {
+    elements.usageBar.style.width = `${timePercent}%`;
+    elements.usageBar.style.borderRadius = "6px 0 0 6px";
+
+    const excessWidth = usagePercent - timePercent;
+    elements.excessBar.style.left = `${timePercent}%`;
+    elements.excessBar.style.width = `${excessWidth}%`;
+    elements.excessBar.style.opacity = "1";
+    elements.excessBar.className = "bar-excess" + (cls ? ` ${cls}` : "");
+  } else {
+    elements.usageBar.style.width = `${usagePercent}%`;
+    elements.usageBar.style.borderRadius = "";
+
+    elements.excessBar.style.width = "0%";
+    elements.excessBar.style.left = `${usagePercent}%`;
+    elements.excessBar.style.opacity = "0";
+    elements.excessBar.className = "bar-excess";
+  }
 
   elements.usageBar.className = "bar-usage" + (cls ? ` ${cls}` : "");
-  elements.timeBar.className = "bar-time" + (cls ? ` ${cls}` : "");
 
   const resetTimeStr = formatResetTime(resetsAt);
   const remainStr = formatRemaining(resetsAt);
+  const excessSuffix = isOverpace
+    ? ` (+${Math.round(usagePercent - timePercent)}%)`
+    : "";
   elements.detail.textContent =
-    `${Math.round(usagePercent)}% used  ·  Reset ${resetTimeStr} (${remainStr})`;
+    `${Math.round(usagePercent)}% used${excessSuffix}  ·  Reset ${resetTimeStr} (${remainStr})`;
 }
 
 export function updateWidget(data: UsageData) {
   const sessionElements: BarElements = {
     usageBar: document.getElementById("session-usage-bar")!,
     timeBar: document.getElementById("session-time-bar")!,
+    excessBar: document.getElementById("session-excess-bar")!,
     detail: document.getElementById("session-detail")!,
   };
 
   const weeklyElements: BarElements = {
     usageBar: document.getElementById("weekly-usage-bar")!,
     timeBar: document.getElementById("weekly-time-bar")!,
+    excessBar: document.getElementById("weekly-excess-bar")!,
     detail: document.getElementById("weekly-detail")!,
   };
 
