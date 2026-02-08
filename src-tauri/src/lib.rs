@@ -1,5 +1,7 @@
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -256,6 +258,7 @@ pub fn run() {
             // Start dynamic polling loop
             let app_handle = app.handle().clone();
             let pc = polling_control;
+            let watcher_pc = Arc::clone(&pc);
             let mut interval_rx = interval_rx;
 
             tauri::async_runtime::spawn(async move {
@@ -312,6 +315,48 @@ pub fn run() {
                         }
                         Ok(_) = interval_rx.changed() => {
                             continue;
+                        }
+                    }
+                }
+            });
+
+            // Start credentials file watcher
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Ok(cred_path) = credentials_path() {
+                    if let Some(parent) = cred_path.parent() {
+                        let (tx, rx) = std_mpsc::channel();
+                        let mut watcher: RecommendedWatcher =
+                            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                                if let Ok(event) = res {
+                                    if event.kind.is_modify() || event.kind.is_create() {
+                                        let _ = tx.send(());
+                                    }
+                                }
+                            }) {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    eprintln!("Failed to create file watcher: {}", e);
+                                    return;
+                                }
+                            };
+
+                        if let Err(e) = watcher.watch(parent, RecursiveMode::NonRecursive) {
+                            eprintln!("Failed to watch credentials dir: {}", e);
+                            return;
+                        }
+
+                        eprintln!("Watching credentials file: {}", cred_path.display());
+
+                        loop {
+                            // Wait for file change, debounce with 1s timeout
+                            if rx.recv().is_ok() {
+                                // Drain any additional events within 1 second
+                                while rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok() {}
+                                eprintln!("Credentials file changed, triggering refresh...");
+                                watcher_pc.refresh_notify.notify_one();
+                            } else {
+                                break;
+                            }
                         }
                     }
                 }

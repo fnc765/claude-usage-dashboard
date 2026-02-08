@@ -47,20 +47,24 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     switch (event.payload) {
       case "expired":
-        statusEl.textContent = "Token expired";
+        statusEl.textContent = "⚠ Token expired";
         statusEl.className = "token-status error";
+        statusEl.title = "アクセストークンの有効期限が切れました。\nターミナルで claude コマンドを実行すると更新されます。";
         break;
       case "error":
-        statusEl.textContent = "Credentials not found";
+        statusEl.textContent = "⚠ No credentials";
         statusEl.className = "token-status error";
+        statusEl.title = "~/.claude/.credentials.json が見つかりません。\nターミナルで claude login を実行してください。";
         break;
       case "fetch_error":
-        statusEl.textContent = "Fetch error";
+        statusEl.textContent = "⚠ Fetch error";
         statusEl.className = "token-status warning";
+        statusEl.title = "API からデータを取得できませんでした。\nネットワーク接続を確認してください。";
         break;
       case "ok":
         statusEl.textContent = "";
         statusEl.className = "token-status";
+        statusEl.title = "";
         break;
     }
   });
