@@ -377,3 +377,21 @@ html, body {
   background: rgba(59, 130, 246, 0.35);
   color: #93c5fd;
 }
+
+/* Visibility toggles */
+.meter-section.hidden {
+  display: none;
+}
+
+/* Placeholder when all meters are hidden */
+.empty-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: 3.2vw;
+  opacity: 0.4;
+  text-align: center;
+  padding: 2vh 0;
+}

@@ -14,7 +14,7 @@
         <span class="token-status" id="token-status"></span>
       </div>
 
-      <div class="meter-section">
+      <div class="meter-section" data-meter-type="claude-session">
         <div class="meter-label">Claude Current Session</div>
         <div class="bar-track">
           <div class="bar-time" id="session-time-bar"></div>
@@ -24,7 +24,7 @@
         <div class="meter-detail" id="session-detail">-- used</div>
       </div>
 
-      <div class="meter-section">
+      <div class="meter-section" data-meter-type="claude-weekly">
         <div class="meter-label">Claude Weekly Limit</div>
         <div class="bar-track">
           <div class="bar-time" id="weekly-time-bar"></div>
@@ -34,7 +34,7 @@
         <div class="meter-detail" id="weekly-detail">-- used</div>
       </div>
 
-      <div class="meter-section">
+      <div class="meter-section" data-meter-type="copilot">
         <div class="meter-label">GitHub Copilot (Monthly)</div>
         <div class="bar-track">
           <div class="bar-time" id="copilot-time-bar"></div>
@@ -42,6 +42,13 @@
           <div class="bar-excess" id="copilot-excess-bar"></div>
         </div>
         <div class="meter-detail" id="copilot-detail">-- used</div>
+      </div>
+
+      <div class="empty-placeholder" id="empty-placeholder" style="display: none;">
+        All meters hidden<br>
+        <span style="font-size: 0.7em; opacity: 0.6; margin-top: 0.5vh;">
+          Right-click to show meters
+        </span>
       </div>
     </div>
 
@@ -77,6 +84,16 @@
       <button class="menu-item" id="toggle-aot">
         <span class="menu-check" id="aot-check">&#10003;</span>
         Always on Top
+      </button>
+
+      <button class="menu-item" id="toggle-claude-meters">
+        <span class="menu-check" id="claude-meters-check">&#10003;</span>
+        Show Claude Meters
+      </button>
+
+      <button class="menu-item" id="toggle-copilot-meter">
+        <span class="menu-check" id="copilot-meter-check">&#10003;</span>
+        Show GitHub Copilot
       </button>
 
       <div class="menu-divider"></div>

@@ -5,6 +5,8 @@ export interface Settings {
   bgEffect: "transparent" | "mica" | "acrylic";
   alwaysOnTop: boolean;
   pollingInterval: number;
+  showClaudeMeters: boolean;
+  showCopilotMeter: boolean;
 }
 
 const STORAGE_KEY = "widget-settings";
@@ -14,6 +16,8 @@ const DEFAULTS: Settings = {
   bgEffect: "mica",
   alwaysOnTop: true,
   pollingInterval: 60,
+  showClaudeMeters: true,
+  showCopilotMeter: true,
 };
 
 function getEl(id: string): HTMLElement {
@@ -45,8 +49,23 @@ function applyOpacity(opacity: number): void {
   }
 }
 
+function applyMeterVisibility(settings: Settings): void {
+  const sessionMeter = document.querySelector('[data-meter-type="claude-session"]');
+  const weeklyMeter = document.querySelector('[data-meter-type="claude-weekly"]');
+  const copilotMeter = document.querySelector('[data-meter-type="copilot"]');
+  const placeholder = document.getElementById('empty-placeholder');
+
+  if (sessionMeter) sessionMeter.classList.toggle('hidden', !settings.showClaudeMeters);
+  if (weeklyMeter) weeklyMeter.classList.toggle('hidden', !settings.showClaudeMeters);
+  if (copilotMeter) copilotMeter.classList.toggle('hidden', !settings.showCopilotMeter);
+
+  const allHidden = !settings.showClaudeMeters && !settings.showCopilotMeter;
+  if (placeholder) placeholder.style.display = allHidden ? 'flex' : 'none';
+}
+
 async function applyAllSettings(settings: Settings): Promise<void> {
   applyOpacity(settings.opacity);
+  applyMeterVisibility(settings);
 
   try {
     await invoke("set_background_effect", { effect: settings.bgEffect });
@@ -118,6 +137,16 @@ export function initContextMenu(): void {
         parseInt(btn.dataset.interval!) === settings.pollingInterval,
       );
     });
+
+    // Sync visibility toggle checkmarks
+    const claudeMetersCheck = document.getElementById("claude-meters-check");
+    const copilotMeterCheck = document.getElementById("copilot-meter-check");
+    if (claudeMetersCheck) {
+      claudeMetersCheck.textContent = settings.showClaudeMeters ? "\u2713" : "";
+    }
+    if (copilotMeterCheck) {
+      copilotMeterCheck.textContent = settings.showCopilotMeter ? "\u2713" : "";
+    }
   }
 
   applyAllSettings(settings);
@@ -185,6 +214,28 @@ export function initContextMenu(): void {
     } catch (e) {
       console.warn("Failed to set always on top:", e);
     }
+  });
+
+  // Claude meters visibility toggle
+  const toggleClaudeMeters = getEl("toggle-claude-meters");
+  const claudeMetersCheck = getEl("claude-meters-check");
+
+  toggleClaudeMeters.addEventListener("click", () => {
+    settings.showClaudeMeters = !settings.showClaudeMeters;
+    saveSettings(settings);
+    claudeMetersCheck.textContent = settings.showClaudeMeters ? "\u2713" : "";
+    applyMeterVisibility(settings);
+  });
+
+  // Copilot meter visibility toggle
+  const toggleCopilotMeter = getEl("toggle-copilot-meter");
+  const copilotMeterCheck = getEl("copilot-meter-check");
+
+  toggleCopilotMeter.addEventListener("click", () => {
+    settings.showCopilotMeter = !settings.showCopilotMeter;
+    saveSettings(settings);
+    copilotMeterCheck.textContent = settings.showCopilotMeter ? "\u2713" : "";
+    applyMeterVisibility(settings);
   });
 
   // Polling interval buttons
