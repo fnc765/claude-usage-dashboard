@@ -34,6 +34,16 @@
         </div>
         <div class="meter-detail" id="weekly-detail">-- used</div>
       </div>
+
+      <div class="meter-section">
+        <div class="meter-label">GitHub Copilot (Monthly)</div>
+        <div class="bar-track">
+          <div class="bar-time" id="copilot-time-bar"></div>
+          <div class="bar-usage" id="copilot-usage-bar"></div>
+          <div class="bar-excess" id="copilot-excess-bar"></div>
+        </div>
+        <div class="meter-detail" id="copilot-detail">-- used</div>
+      </div>
     </div>
 
     <div id="context-menu" class="context-menu">
@@ -80,6 +90,33 @@
           <button class="menu-seg-btn" data-interval="120">2m</button>
           <button class="menu-seg-btn" data-interval="300">5m</button>
         </div>
+      </div>
+
+      <div class="menu-divider"></div>
+
+      <div class="menu-section">
+        <label class="menu-label">GitHub Copilot Settings</label>
+        <input
+          type="text"
+          id="github-username"
+          class="menu-input"
+          placeholder="Username"
+        />
+        <input
+          type="password"
+          id="github-token"
+          class="menu-input"
+          placeholder="Personal Access Token"
+        />
+        <input
+          type="number"
+          id="monthly-limit"
+          class="menu-input"
+          placeholder="Monthly Limit (e.g., 300)"
+          value="300"
+          min="1"
+        />
+        <button class="menu-btn" id="save-github-config">Save</button>
       </div>
 
       <div class="menu-divider"></div>

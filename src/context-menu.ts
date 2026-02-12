@@ -223,4 +223,48 @@ export function initContextMenu(): void {
       console.warn("Failed to quit app:", e);
     }
   });
+
+  // GitHub 設定の読み込み
+  loadGitHubConfig();
+
+  // GitHub 設定の保存
+  const saveBtn = getEl("save-github-config");
+  saveBtn.addEventListener("click", async () => {
+    const username = (getEl("github-username") as HTMLInputElement).value.trim();
+    const token = (getEl("github-token") as HTMLInputElement).value.trim();
+    const limitStr = (getEl("monthly-limit") as HTMLInputElement).value.trim();
+    const monthlyLimit = parseFloat(limitStr) || 300;
+
+    if (!username || !token) {
+      alert("Username and Token are required");
+      return;
+    }
+
+    try {
+      await invoke("save_github_config", {
+        username,
+        token,
+        monthlyLimit,
+      });
+      alert("Settings saved successfully!");
+      await invoke("force_refresh");
+    } catch (e) {
+      alert(`Failed to save settings: ${e}`);
+    }
+  });
+}
+
+async function loadGitHubConfig() {
+  try {
+    const config = await invoke("get_github_config") as any;
+    if (config) {
+      const usernameEl = document.getElementById("github-username") as HTMLInputElement;
+      const limitEl = document.getElementById("monthly-limit") as HTMLInputElement;
+      if (usernameEl) usernameEl.value = config.username || "";
+      if (limitEl) limitEl.value = String(config.monthly_limit || 300);
+      // トークンは表示しない（セキュリティ上の理由）
+    }
+  } catch (e) {
+    console.error("Failed to load GitHub config:", e);
+  }
 }

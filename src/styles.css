@@ -148,6 +148,15 @@ html, body {
   background: linear-gradient(90deg, #8B5CF6, #7C3AED);
 }
 
+/* Copilot colors (緑系) */
+.widget > .meter-section:nth-child(4) .bar-time {
+  background: #A7F3D0;
+}
+
+.widget > .meter-section:nth-child(4) .bar-usage {
+  background: linear-gradient(90deg, #10B981, #059669);
+}
+
 /* Warning state (60-80%) */
 .bar-usage.warning {
   background: linear-gradient(90deg, #F59E0B, #D97706);
@@ -326,4 +335,45 @@ html, body {
   font-size: 13px;
   text-align: center;
   opacity: 0.7;
+}
+
+.menu-input {
+  width: 100%;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  border-radius: 4px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.menu-input:focus {
+  border-color: #3b82f6;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.menu-input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.menu-btn {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: rgba(59, 130, 246, 0.25);
+  color: #60a5fa;
+  font-size: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+
+.menu-btn:hover {
+  background: rgba(59, 130, 246, 0.35);
+  color: #93c5fd;
 }

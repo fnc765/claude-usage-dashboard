@@ -21,6 +21,24 @@ export interface UsageData {
   extra_usage?: ExtraUsage | null;
 }
 
+export interface CopilotUsageItem {
+  model: string;
+  gross_quantity: number;
+}
+
+export interface CopilotUsageData {
+  total_requests: number;
+  monthly_limit: number;
+  utilization: number;
+  resets_at: string;
+  items: CopilotUsageItem[];
+}
+
+export interface CombinedUsageData {
+  claude: UsageData;
+  copilot?: CopilotUsageData | null;
+}
+
 interface BarElements {
   usageBar: HTMLElement;
   timeBar: HTMLElement;
@@ -87,6 +105,22 @@ function calcTimeElapsedPercent(resetsAt: string | null, windowHours: number): n
   return Math.max(0, Math.min(100, (elapsed / totalMs) * 100));
 }
 
+function calcMonthlyTimeElapsedPercent(resetsAt: string | null): number {
+  if (!resetsAt) return 0;
+  const reset = new Date(resetsAt);
+  if (isNaN(reset.getTime())) return 0;
+
+  const now = new Date();
+  const monthStart = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0)
+  );
+
+  const totalMs = reset.getTime() - monthStart.getTime();
+  const elapsedMs = now.getTime() - monthStart.getTime();
+
+  return Math.max(0, Math.min(100, (elapsedMs / totalMs) * 100));
+}
+
 function updateBar(
   elements: BarElements,
   usagePercent: number,
@@ -149,7 +183,26 @@ function getElement(id: string): HTMLElement {
   return el;
 }
 
-export function updateWidget(data: UsageData) {
+function updateCopilotBar(copilot: CopilotUsageData) {
+  const copilotElements: BarElements = {
+    usageBar: getElement("copilot-usage-bar"),
+    timeBar: getElement("copilot-time-bar"),
+    excessBar: getElement("copilot-excess-bar"),
+    detail: getElement("copilot-detail"),
+  };
+
+  const timePercent = calcMonthlyTimeElapsedPercent(copilot.resets_at);
+
+  updateBar(
+    copilotElements,
+    copilot.utilization,
+    timePercent,
+    copilot.resets_at,
+    "Not configured",
+  );
+}
+
+export function updateWidget(data: CombinedUsageData) {
   const sessionElements: BarElements = {
     usageBar: getElement("session-usage-bar"),
     timeBar: getElement("session-time-bar"),
@@ -164,22 +217,27 @@ export function updateWidget(data: UsageData) {
     detail: getElement("weekly-detail"),
   };
 
-  const sessionTimePercent = calcTimeElapsedPercent(data.five_hour.resets_at, 5);
-  const weeklyTimePercent = calcTimeElapsedPercent(data.seven_day.resets_at, 168);
+  const sessionTimePercent = calcTimeElapsedPercent(data.claude.five_hour.resets_at, 5);
+  const weeklyTimePercent = calcTimeElapsedPercent(data.claude.seven_day.resets_at, 168);
 
   updateBar(
     sessionElements,
-    data.five_hour.utilization,
+    data.claude.five_hour.utilization,
     sessionTimePercent,
-    data.five_hour.resets_at,
+    data.claude.five_hour.resets_at,
     "No active session",
   );
 
   updateBar(
     weeklyElements,
-    data.seven_day.utilization,
+    data.claude.seven_day.utilization,
     weeklyTimePercent,
-    data.seven_day.resets_at,
+    data.claude.seven_day.resets_at,
     "Awaiting reset",
   );
+
+  // Copilot 使用量更新
+  if (data.copilot) {
+    updateCopilotBar(data.copilot);
+  }
 }

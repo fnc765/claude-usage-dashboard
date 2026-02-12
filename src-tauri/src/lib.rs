@@ -57,6 +57,46 @@ struct UsageData {
     extra_usage: Option<ExtraUsage>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitHubConfig {
+    username: String,
+    token: String,
+    #[serde(default = "default_monthly_limit")]
+    monthly_limit: f64,
+}
+
+fn default_monthly_limit() -> f64 {
+    300.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppConfig {
+    #[serde(default)]
+    github: Option<GitHubConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CopilotUsageItem {
+    model: String,
+    gross_quantity: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CopilotUsageData {
+    total_requests: f64,
+    monthly_limit: f64,
+    utilization: f64,
+    resets_at: String,
+    items: Vec<CopilotUsageItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CombinedUsageData {
+    claude: UsageData,
+    #[serde(default)]
+    copilot: Option<CopilotUsageData>,
+}
+
 struct AppState {
     latest_usage: Option<UsageData>,
     http_client: reqwest::Client,
@@ -70,6 +110,52 @@ struct PollingControl {
 fn credentials_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "Could not find home directory".to_string())?;
     Ok(home.join(".claude").join(".credentials.json"))
+}
+
+fn config_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Could not find home directory")?;
+    let config_dir = home.join(".usage-dashboard");
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("Failed to create config directory: {}", e))?;
+    Ok(config_dir.join("config.json"))
+}
+
+fn read_app_config() -> Result<AppConfig, String> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(AppConfig { github: None });
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read config: {}", e))?;
+    serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse config: {}", e))
+}
+
+fn write_app_config(config: &AppConfig) -> Result<(), String> {
+    let path = config_path()?;
+    let content = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write config: {}", e))
+}
+
+fn calculate_next_month_reset() -> String {
+    use chrono::{Datelike, TimeZone, Utc};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let datetime = chrono::DateTime::<Utc>::from_timestamp(now as i64, 0).unwrap();
+
+    let next_month = if datetime.month() == 12 {
+        Utc.with_ymd_and_hms(datetime.year() + 1, 1, 1, 0, 0, 0).unwrap()
+    } else {
+        Utc.with_ymd_and_hms(datetime.year(), datetime.month() + 1, 1, 0, 0, 0).unwrap()
+    };
+
+    next_month.to_rfc3339()
 }
 
 struct TokenInfo {
@@ -125,6 +211,70 @@ async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageData,
     let truncated: String = body.chars().take(500).collect();
     serde_json::from_str::<UsageData>(&body).map_err(|e| {
         format!("Failed to parse response: {}. Body: {}", e, truncated)
+    })
+}
+
+async fn fetch_copilot_usage(
+    client: &reqwest::Client,
+    username: &str,
+    token: &str,
+    monthly_limit: f64,
+) -> Result<CopilotUsageData, String> {
+    let url = format!(
+        "https://api.github.com/users/{}/settings/billing/premium_request/usage",
+        username
+    );
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("token {}", token))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "tauri-usage-dashboard")
+        .send()
+        .await
+        .map_err(|e| format!("GitHub API request failed: {}", e.without_url()))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".into());
+        return Err(format!("GitHub API status {}: {}", status, body));
+    }
+
+    let body = resp.text().await
+        .map_err(|e| format!("Failed to read GitHub response: {}", e))?;
+
+    let api_response: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse GitHub response: {}", e))?;
+
+    let items = api_response["usageItems"]
+        .as_array()
+        .ok_or("Missing usageItems array")?;
+
+    let mut total_requests = 0.0;
+    let mut usage_items = Vec::new();
+
+    for item in items {
+        if let Some(quantity) = item["grossQuantity"].as_f64() {
+            total_requests += quantity;
+            if let Some(model) = item["model"].as_str() {
+                usage_items.push(CopilotUsageItem {
+                    model: model.to_string(),
+                    gross_quantity: quantity,
+                });
+            }
+        }
+    }
+
+    let utilization = (total_requests / monthly_limit) * 100.0;
+    let resets_at = calculate_next_month_reset();
+
+    Ok(CopilotUsageData {
+        total_requests,
+        monthly_limit,
+        utilization,
+        resets_at,
+        items: usage_items,
     })
 }
 
@@ -192,6 +342,27 @@ fn set_polling_interval(
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+#[tauri::command]
+fn get_github_config() -> Result<Option<GitHubConfig>, String> {
+    Ok(read_app_config()?.github)
+}
+
+#[tauri::command]
+fn save_github_config(
+    username: String,
+    token: String,
+    monthly_limit: f64,
+) -> Result<(), String> {
+    let mut config = read_app_config().unwrap_or(AppConfig { github: None });
+    config.github = Some(GitHubConfig {
+        username,
+        token,
+        monthly_limit,
+    });
+    write_app_config(&config)?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -284,17 +455,43 @@ pub fn run() {
                         s.http_client.clone()
                     };
 
-                    match fetch_usage(&client, &token_info.access_token).await {
-                        Ok(data) => {
-                            let _ = app_handle.emit("usage-update", &data);
+                    let claude_result = fetch_usage(&client, &token_info.access_token).await;
+
+                    // GitHub 設定を読み込み
+                    let github_config = read_app_config().ok().and_then(|c| c.github);
+
+                    // GitHub 使用量取得（設定がある場合のみ）
+                    let copilot_result = if let Some(gh) = github_config {
+                        fetch_copilot_usage(&client, &gh.username, &gh.token, gh.monthly_limit)
+                            .await
+                            .ok()
+                    } else {
+                        None
+                    };
+
+                    // 結果を結合して送信
+                    match claude_result {
+                        Ok(claude_data) => {
+                            let combined = CombinedUsageData {
+                                claude: claude_data.clone(),
+                                copilot: copilot_result,
+                            };
+
+                            let _ = app_handle.emit("usage-update", &combined);
                             let _ = app_handle.emit("token-status", "ok");
+
                             let state = app_handle.state::<Arc<Mutex<AppState>>>();
                             let mut s = state.lock().await;
-                            s.latest_usage = Some(data);
+                            s.latest_usage = Some(claude_data);
                         }
                         Err(e) => {
-                            eprintln!("Usage fetch error: {}", e);
+                            eprintln!("Claude API error: {}", e);
                             let _ = app_handle.emit("token-status", "fetch_error");
+
+                            // Claude 失敗時でも Copilot データは送信
+                            if let Some(copilot_data) = copilot_result {
+                                let _ = app_handle.emit("copilot-only-update", &copilot_data);
+                            }
                         }
                     }
                 }
@@ -371,6 +568,8 @@ pub fn run() {
             force_refresh,
             set_polling_interval,
             quit_app,
+            get_github_config,
+            save_github_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
