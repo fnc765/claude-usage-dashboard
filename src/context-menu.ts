@@ -7,6 +7,7 @@ export interface Settings {
   pollingInterval: number;
   showClaudeMeters: boolean;
   showCopilotMeter: boolean;
+  autostartEnabled: boolean;
 }
 
 const STORAGE_KEY = "widget-settings";
@@ -18,6 +19,7 @@ const DEFAULTS: Settings = {
   pollingInterval: 60,
   showClaudeMeters: true,
   showCopilotMeter: true,
+  autostartEnabled: false,
 };
 
 function getEl(id: string): HTMLElement {
@@ -147,10 +149,19 @@ export function initContextMenu(): void {
     if (copilotMeterCheck) {
       copilotMeterCheck.textContent = settings.showCopilotMeter ? "\u2713" : "";
     }
+
+    // Autostart checkmark
+    const autostartCheck = document.getElementById("autostart-check");
+    if (autostartCheck) {
+      autostartCheck.textContent = settings.autostartEnabled ? "\u2713" : "";
+    }
   }
 
   applyAllSettings(settings);
   syncMenuUI();
+
+  // Load autostart status from system on startup
+  loadAutostartStatus();
 
   // Right-click to open
   document.addEventListener("contextmenu", (e) => {
@@ -275,6 +286,27 @@ export function initContextMenu(): void {
     }
   });
 
+  // Autostart toggle
+  const toggleAutostart = getEl("toggle-autostart");
+  const autostartCheck = getEl("autostart-check");
+
+  toggleAutostart.addEventListener("click", async () => {
+    try {
+      if (settings.autostartEnabled) {
+        await invoke("disable_autostart");
+        settings.autostartEnabled = false;
+      } else {
+        await invoke("enable_autostart");
+        settings.autostartEnabled = true;
+      }
+      saveSettings(settings);
+      autostartCheck.textContent = settings.autostartEnabled ? "\u2713" : "";
+    } catch (e) {
+      console.error("Failed to toggle autostart:", e);
+      alert(`Failed to toggle autostart: ${e}`);
+    }
+  });
+
   // GitHub 設定の読み込み
   loadGitHubConfig();
 
@@ -317,5 +349,21 @@ async function loadGitHubConfig() {
     }
   } catch (e) {
     console.error("Failed to load GitHub config:", e);
+  }
+}
+
+async function loadAutostartStatus() {
+  try {
+    const isEnabled = await invoke("is_autostart_enabled") as boolean;
+    const settings = loadSettings();
+    settings.autostartEnabled = isEnabled;
+    saveSettings(settings);
+
+    const autostartCheck = document.getElementById("autostart-check");
+    if (autostartCheck) {
+      autostartCheck.textContent = isEnabled ? "\u2713" : "";
+    }
+  } catch (e) {
+    console.error("Failed to load autostart status:", e);
   }
 }

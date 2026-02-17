@@ -26,6 +26,8 @@ Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視�
 ### カスタマイズ・操作
 - **メーター表示切替**: Claude メーター・Copilot メーター を個別に表示/非表示可能
   - 設定は localStorage に永続化され、アプリ再起動後も保持される
+- **自動起動**: Windows ログイン時に自動的にアプリを起動 (Windows専用)
+  - Context Menu から有効/無効を切り替え可能
 - 常に最前面に表示 (トグル可)
 - ウィンドウの透過度・背景エフェクト (Mica / Acrylic) のカスタマイズ
 - ポーリング間隔の変更 (30秒〜5分)
@@ -72,6 +74,7 @@ pnpm tauri build
    - ポーリング間隔
    - 手動リフレッシュ
    - **メーター表示切替**: Claude メーター / GitHub Copilot メーター を個別に表示/非表示
+   - **自動起動設定** (Windows専用): Windows ログイン時の自動起動を ON/OFF
 4. システムトレイアイコンからウィジェットの表示/非表示を切り替えられます
 
 ### GitHub Copilot の設定 (オプション)

@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
+use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::time::Duration;
 
@@ -73,6 +74,8 @@ fn default_monthly_limit() -> f64 {
 struct AppConfig {
     #[serde(default)]
     github: Option<GitHubConfig>,
+    #[serde(default)]
+    autostart_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +126,7 @@ fn config_path() -> Result<PathBuf, String> {
 fn read_app_config() -> Result<AppConfig, String> {
     let path = config_path()?;
     if !path.exists() {
-        return Ok(AppConfig { github: None });
+        return Ok(AppConfig { github: None, autostart_enabled: false });
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
@@ -355,7 +358,7 @@ fn save_github_config(
     token: String,
     monthly_limit: f64,
 ) -> Result<(), String> {
-    let mut config = read_app_config().unwrap_or(AppConfig { github: None });
+    let mut config = read_app_config().unwrap_or(AppConfig { github: None, autostart_enabled: false });
     config.github = Some(GitHubConfig {
         username,
         token,
@@ -363,6 +366,69 @@ fn save_github_config(
     });
     write_app_config(&config)?;
     Ok(())
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+async fn is_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| format!("Failed to check autostart status: {}", e))
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+async fn enable_autostart(app: tauri::AppHandle) -> Result<(), String> {
+    app.autolaunch()
+        .enable()
+        .map_err(|e| format!("Failed to enable autostart: {}", e))?;
+
+    // 設定ファイルに保存
+    let mut config = read_app_config().unwrap_or(AppConfig {
+        github: None,
+        autostart_enabled: false,
+    });
+    config.autostart_enabled = true;
+    write_app_config(&config)?;
+
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+async fn disable_autostart(app: tauri::AppHandle) -> Result<(), String> {
+    app.autolaunch()
+        .disable()
+        .map_err(|e| format!("Failed to disable autostart: {}", e))?;
+
+    // 設定ファイルに保存
+    let mut config = read_app_config().unwrap_or(AppConfig {
+        github: None,
+        autostart_enabled: false,
+    });
+    config.autostart_enabled = false;
+    write_app_config(&config)?;
+
+    Ok(())
+}
+
+// Windows以外のプラットフォーム向けのフォールバック実装
+#[tauri::command]
+#[cfg(not(target_os = "windows"))]
+async fn is_autostart_enabled(_app: tauri::AppHandle) -> Result<bool, String> {
+    Err("Autostart is only supported on Windows".to_string())
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "windows"))]
+async fn enable_autostart(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("Autostart is only supported on Windows".to_string())
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "windows"))]
+async fn disable_autostart(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("Autostart is only supported on Windows".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -373,8 +439,18 @@ pub fn run() {
         refresh_notify: Notify::new(),
     });
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init());
+
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ));
+    }
+
+    builder
         .manage(Arc::new(Mutex::new(AppState {
             latest_usage: None,
             http_client: reqwest::Client::builder()
@@ -570,6 +646,9 @@ pub fn run() {
             quit_app,
             get_github_config,
             save_github_config,
+            is_autostart_enabled,
+            enable_autostart,
+            disable_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
