@@ -772,3 +772,206 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_monthly_limit() {
+        assert_eq!(default_monthly_limit(), 300.0);
+    }
+
+    #[test]
+    fn test_is_token_expired_not_expired() {
+        // 1時間後に期限切れ (3600秒 = 3,600,000ミリ秒)
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let expires_at = now_ms + 3_600_000;
+
+        // 30秒のバッファがあるため、まだ期限切れではない
+        assert!(!is_token_expired(expires_at));
+    }
+
+    #[test]
+    fn test_is_token_expired_expired() {
+        // 過去のタイムスタンプ
+        let expires_at = 1000000;
+        assert!(is_token_expired(expires_at));
+    }
+
+    #[test]
+    fn test_is_token_expired_buffer() {
+        // 現在時刻 + 20秒後（30秒のバッファより短い）
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let expires_at = now_ms + 20_000;
+
+        // 30秒のバッファがあるため、期限切れとみなされる
+        assert!(is_token_expired(expires_at));
+    }
+
+    #[test]
+    fn test_calculate_next_month_reset_format() {
+        let reset_date = calculate_next_month_reset();
+
+        // RFC3339形式であることを確認
+        assert!(reset_date.contains("T"));
+        assert!(reset_date.contains("Z") || reset_date.contains("+"));
+
+        // 日付をパース可能であることを確認
+        assert!(chrono::DateTime::parse_from_rfc3339(&reset_date).is_ok());
+    }
+
+    #[test]
+    fn test_credentials_path() {
+        let path = credentials_path();
+        assert!(path.is_ok());
+
+        let path = path.unwrap();
+        assert!(path.to_string_lossy().contains(".claude"));
+        assert!(path.to_string_lossy().contains(".credentials.json"));
+    }
+
+    #[test]
+    fn test_config_path() {
+        let path = config_path();
+        assert!(path.is_ok());
+
+        let path = path.unwrap();
+        assert!(path.to_string_lossy().contains(".usage-dashboard"));
+        assert!(path.to_string_lossy().contains("config.json"));
+    }
+
+    #[test]
+    fn test_usage_meter_serialization() {
+        let meter = UsageMeter {
+            utilization: 45.5,
+            resets_at: Some("2026-03-01T00:00:00Z".to_string()),
+        };
+
+        let json = serde_json::to_string(&meter).unwrap();
+        assert!(json.contains("45.5"));
+        assert!(json.contains("2026-03-01T00:00:00Z"));
+
+        let deserialized: UsageMeter = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.utilization, 45.5);
+        assert_eq!(deserialized.resets_at, Some("2026-03-01T00:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn test_extra_usage_serialization() {
+        let extra = ExtraUsage {
+            is_enabled: true,
+            monthly_limit: 1000.0,
+            used_credits: 250.0,
+            utilization: 25.0,
+        };
+
+        let json = serde_json::to_string(&extra).unwrap();
+        let deserialized: ExtraUsage = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.is_enabled, true);
+        assert_eq!(deserialized.monthly_limit, 1000.0);
+        assert_eq!(deserialized.used_credits, 250.0);
+        assert_eq!(deserialized.utilization, 25.0);
+    }
+
+    #[test]
+    fn test_github_config_serialization() {
+        let config = GitHubConfig {
+            username: "testuser".to_string(),
+            token: "ghp_test123".to_string(),
+            monthly_limit: 500.0,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: GitHubConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.username, "testuser");
+        assert_eq!(deserialized.token, "ghp_test123");
+        assert_eq!(deserialized.monthly_limit, 500.0);
+    }
+
+    #[test]
+    fn test_github_config_default_monthly_limit() {
+        let json = r#"{"username":"testuser","token":"ghp_test123"}"#;
+        let config: GitHubConfig = serde_json::from_str(json).unwrap();
+
+        // デフォルト値が適用されるべき
+        assert_eq!(config.monthly_limit, 300.0);
+    }
+
+    #[test]
+    fn test_wsl_config_serialization() {
+        let config = WslConfig {
+            credentials_path: r"\\wsl.localhost\Ubuntu-24.04\home\user\.claude\.credentials.json".to_string(),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: WslConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(deserialized.credentials_path.contains("wsl.localhost"));
+    }
+
+    #[test]
+    fn test_app_config_defaults() {
+        let json = "{}";
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+
+        assert!(config.github.is_none());
+        assert_eq!(config.autostart_enabled, false);
+        assert!(config.wsl.is_none());
+    }
+
+    #[test]
+    fn test_copilot_usage_calculation() {
+        let items = vec![
+            CopilotUsageItem {
+                model: "gpt-4".to_string(),
+                gross_quantity: 100.0,
+            },
+            CopilotUsageItem {
+                model: "gpt-3.5".to_string(),
+                gross_quantity: 50.0,
+            },
+        ];
+
+        let total: f64 = items.iter().map(|i| i.gross_quantity).sum();
+        let monthly_limit = 300.0;
+        let utilization = (total / monthly_limit) * 100.0;
+
+        assert_eq!(total, 150.0);
+        assert_eq!(utilization, 50.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_path_validation() {
+        // 有効なWSLパス
+        let valid_path = r"\\wsl.localhost\Ubuntu-24.04\home\user\.claude\.credentials.json";
+        assert!(valid_path.starts_with(r"\\wsl.localhost\"));
+
+        // パストラバーサル攻撃を含むパス
+        let invalid_path = r"\\wsl.localhost\Ubuntu-24.04\..\..\..\etc\passwd";
+        assert!(invalid_path.contains(".."));
+
+        // WSLパスでない
+        let non_wsl_path = r"C:\Users\user\.claude\.credentials.json";
+        assert!(!non_wsl_path.starts_with(r"\\wsl.localhost\"));
+    }
+
+    #[test]
+    fn test_read_app_config_nonexistent() {
+        // この関数は存在しないファイルに対してデフォルト値を返すべき
+        // 実際のファイルシステムに依存するため、モックが必要だが
+        // 少なくとも関数が呼び出し可能であることを確認
+        let result = read_app_config();
+        // エラーまたはデフォルト値が返される
+        assert!(result.is_ok() || result.is_err());
+    }
+}

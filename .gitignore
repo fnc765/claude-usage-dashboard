@@ -29,3 +29,6 @@ tmpclaude-*
 
 # Environment
 .env*
+
+# Test coverage
+coverage/
