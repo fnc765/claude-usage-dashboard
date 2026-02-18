@@ -34,6 +34,20 @@ Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視�
 - システムトレイからの表示/非表示切り替え
 - ドラッグ移動・リサイズ対応
 
+## 対応プラットフォーム
+
+- **Windows** (Windows 10/11)
+- **Linux** (Ubuntu, Debian, Fedora など)
+- **macOS** (実験的)
+
+### Linux / WSL での使用について
+
+- **WSL内のClaude Code**: WSL環境でClaude Codeを使用している場合、WSL内で本アプリをビルド・実行してください
+- **認証ファイルの場所**: `~/.claude/.credentials.json`（Linux/WSLのホームディレクトリ）
+- **制限事項**:
+  - Window Vibrancy（背景エフェクト）はWindows専用です
+  - 自動起動機能はWindows専用です
+
 ## 前提条件
 
 ### 必須
@@ -48,7 +62,44 @@ Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視�
   - スコープ: `copilot` 権限が必要
   - [GitHub Settings](https://github.com/settings/tokens) から生成できます
 
-## セットアップ
+## インストール方法
+
+### 方法1: ビルド済みパッケージを使用（推奨）
+
+#### Linux (Ubuntu/Debian)
+
+```bash
+# 1. GitHubのReleaseページから.debファイルをダウンロード
+wget https://github.com/<your-username>/usage-dashboard/releases/latest/download/usage-dashboard_0.1.0_amd64.deb
+
+# 2. インストール
+sudo dpkg -i usage-dashboard_0.1.0_amd64.deb
+
+# 依存関係のエラーが出た場合
+sudo apt-get install -f
+
+# 3. 実行
+usage-dashboard
+```
+
+#### Linux (AppImage - 全ディストリビューション対応)
+
+```bash
+# 1. AppImageをダウンロード
+wget https://github.com/<your-username>/usage-dashboard/releases/latest/download/usage-dashboard_0.1.0_amd64.AppImage
+
+# 2. 実行権限を付与
+chmod +x usage-dashboard_0.1.0_amd64.AppImage
+
+# 3. 実行
+./usage-dashboard_0.1.0_amd64.AppImage
+```
+
+#### Windows
+
+[GitHubのReleaseページ](https://github.com/<your-username>/usage-dashboard/releases)から `.msi` インストーラーをダウンロードして実行してください。
+
+### 方法2: ソースからビルド
 
 ```bash
 # 依存パッケージのインストール
@@ -69,12 +120,12 @@ pnpm tauri build
 2. ウィジェットをドラッグして好きな位置に配置できます
 3. **右クリック** でコンテキストメニューを開き、以下をカスタマイズできます:
    - 透過度 (Opacity)
-   - 背景エフェクト (Transparent / Mica / Acrylic)
+   - 背景エフェクト (Transparent / Mica / Acrylic) ※Windows専用
    - 常に最前面表示の ON/OFF
    - ポーリング間隔
    - 手動リフレッシュ
    - **メーター表示切替**: Claude メーター / GitHub Copilot メーター を個別に表示/非表示
-   - **自動起動設定** (Windows専用): Windows ログイン時の自動起動を ON/OFF
+   - **自動起動設定**: ログイン時の自動起動を ON/OFF ※Windows専用
 4. システムトレイアイコンからウィジェットの表示/非表示を切り替えられます
 
 ### GitHub Copilot の設定 (オプション)
