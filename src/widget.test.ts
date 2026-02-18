@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { isExpired, updateWidget, type CombinedUsageData, type UsageData, type CopilotUsageData } from './widget';
 
 describe('widget.ts', () => {
@@ -140,7 +140,6 @@ describe('widget.ts', () => {
 
       const excessBar = document.getElementById('session-excess-bar');
       // Excess bar should have some opacity when overpacing
-      const opacity = window.getComputedStyle(excessBar!).opacity;
       // Note: in happy-dom, style.opacity might not compute, so we check the style attribute
       expect(excessBar?.style.opacity).toBeDefined();
     });
