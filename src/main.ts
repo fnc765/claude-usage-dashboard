@@ -1,8 +1,9 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { updateWidget, isExpired, type CombinedUsageData, type CopilotUsageData } from "./widget";
+import { updateWidget, isExpired, type CombinedUsageData, type CopilotUsageData, type UsageData } from "./widget";
 import { initContextMenu } from "./context-menu";
+import { POLLING_INTERVALS } from "./constants";
 
 let latestData: CombinedUsageData | null = null;
 let refreshTriggered = false;
@@ -22,12 +23,12 @@ async function initDrag() {
 
 async function fetchInitialData() {
   try {
-    const data = await invoke<CombinedUsageData>("get_usage");
-    // get_usage returns only Claude data, wrap it in CombinedUsageData format
+    const data = await invoke<CombinedUsageData | UsageData>("get_usage");
+    // get_usage may return only Claude data, wrap it in CombinedUsageData format if needed
     if (data && "five_hour" in data) {
-      latestData = { claude: data as any, copilot: null };
+      latestData = { claude: data as UsageData, copilot: null };
     } else {
-      latestData = data;
+      latestData = data as CombinedUsageData;
     }
     refreshTriggered = false;
     if (latestData) updateWidget(latestData);
@@ -100,5 +101,5 @@ window.addEventListener("DOMContentLoaded", async () => {
         refreshTriggered = false;
       });
     }
-  }, 10_000);
+  }, POLLING_INTERVALS.USAGE_CHECK);
 });

@@ -1,4 +1,9 @@
+// Security: XSS Prevention
+// IMPORTANT: Always use textContent instead of innerHTML when displaying data
+// Input validation is performed for WSL paths to prevent path traversal attacks
+
 import { invoke } from "@tauri-apps/api/core";
+import { DEFAULT_SETTINGS, STORAGE_KEYS, UI_CONSTRAINTS } from "./constants";
 
 export interface Settings {
   opacity: number;
@@ -10,16 +15,25 @@ export interface Settings {
   autostartEnabled: boolean;
 }
 
-const STORAGE_KEY = "widget-settings";
+interface GitHubConfig {
+  username: string;
+  monthly_limit: number;
+}
+
+interface WslConfig {
+  credentials_path: string;
+}
+
+const STORAGE_KEY = STORAGE_KEYS.WIDGET_SETTINGS;
 
 const DEFAULTS: Settings = {
-  opacity: 75,
-  bgEffect: "mica",
-  alwaysOnTop: true,
-  pollingInterval: 60,
-  showClaudeMeters: true,
-  showCopilotMeter: true,
-  autostartEnabled: false,
+  opacity: DEFAULT_SETTINGS.OPACITY,
+  bgEffect: DEFAULT_SETTINGS.BG_EFFECT,
+  alwaysOnTop: DEFAULT_SETTINGS.ALWAYS_ON_TOP,
+  pollingInterval: DEFAULT_SETTINGS.POLLING_INTERVAL,
+  showClaudeMeters: DEFAULT_SETTINGS.SHOW_CLAUDE_METERS,
+  showCopilotMeter: DEFAULT_SETTINGS.SHOW_COPILOT_METER,
+  autostartEnabled: DEFAULT_SETTINGS.AUTOSTART_ENABLED,
 };
 
 function getEl(id: string): HTMLElement {
@@ -106,11 +120,11 @@ export function initContextMenu(): void {
 
     requestAnimationFrame(() => {
       const rect = menu.getBoundingClientRect();
-      const maxX = window.innerWidth - rect.width - 4;
-      const maxY = window.innerHeight - rect.height - 4;
+      const maxX = window.innerWidth - rect.width - UI_CONSTRAINTS.MENU_PADDING;
+      const maxY = window.innerHeight - rect.height - UI_CONSTRAINTS.MENU_PADDING;
 
-      menu.style.left = `${Math.max(4, Math.min(x, maxX))}px`;
-      menu.style.top = `${Math.max(4, Math.min(y, maxY))}px`;
+      menu.style.left = `${Math.max(UI_CONSTRAINTS.MENU_PADDING, Math.min(x, maxX))}px`;
+      menu.style.top = `${Math.max(UI_CONSTRAINTS.MENU_PADDING, Math.min(y, maxY))}px`;
       menu.style.visibility = "visible";
     });
   }
@@ -316,7 +330,7 @@ export function initContextMenu(): void {
     const username = (getEl("github-username") as HTMLInputElement).value.trim();
     const token = (getEl("github-token") as HTMLInputElement).value.trim();
     const limitStr = (getEl("monthly-limit") as HTMLInputElement).value.trim();
-    const monthlyLimit = parseFloat(limitStr) || 300;
+    const monthlyLimit = parseFloat(limitStr) || DEFAULT_SETTINGS.MONTHLY_LIMIT;
 
     if (!username || !token) {
       alert("Username and Token are required");
@@ -362,8 +376,8 @@ export function initContextMenu(): void {
     }
 
     // セキュリティ検証: パスの最大長チェック（DoS対策）
-    if (credentialsPath.length > 500) {
-      alert("Path is too long (max 500 characters)");
+    if (credentialsPath.length > UI_CONSTRAINTS.MAX_PATH_LENGTH) {
+      alert(`Path is too long (max ${UI_CONSTRAINTS.MAX_PATH_LENGTH} characters)`);
       return;
     }
 
@@ -394,12 +408,12 @@ export function initContextMenu(): void {
 
 async function loadGitHubConfig() {
   try {
-    const config = await invoke("get_github_config") as any;
+    const config = await invoke<GitHubConfig>("get_github_config");
     if (config) {
       const usernameEl = document.getElementById("github-username") as HTMLInputElement;
       const limitEl = document.getElementById("monthly-limit") as HTMLInputElement;
       if (usernameEl) usernameEl.value = config.username || "";
-      if (limitEl) limitEl.value = String(config.monthly_limit || 300);
+      if (limitEl) limitEl.value = String(config.monthly_limit || DEFAULT_SETTINGS.MONTHLY_LIMIT);
       // トークンは表示しない（セキュリティ上の理由）
     }
   } catch (e) {
@@ -409,7 +423,7 @@ async function loadGitHubConfig() {
 
 async function loadWslConfig() {
   try {
-    const config = await invoke("get_wsl_config") as any;
+    const config = await invoke<WslConfig>("get_wsl_config");
     if (config) {
       const pathEl = document.getElementById("wsl-credentials-path") as HTMLInputElement;
       if (pathEl) pathEl.value = config.credentials_path || "";

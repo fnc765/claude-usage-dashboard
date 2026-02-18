@@ -1,3 +1,4 @@
+use keyring::Entry;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -10,6 +11,12 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
+
+// Application constants
+const TOKEN_EXPIRATION_BUFFER_MS: u64 = 30_000; // 30 seconds
+const MAX_WSL_PATH_LENGTH: usize = 500;
+const MAX_RESPONSE_PREVIEW_CHARS: usize = 500;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,10 +65,19 @@ struct UsageData {
     extra_usage: Option<ExtraUsage>,
 }
 
+// Security: GitHubConfig with token (runtime use only, not serialized to disk)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GitHubConfig {
     username: String,
     token: String,
+    #[serde(default = "default_monthly_limit")]
+    monthly_limit: f64,
+}
+
+// Security: GitHubConfigStorable without token (safe to store in config.json)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitHubConfigStorable {
+    username: String,
     #[serde(default = "default_monthly_limit")]
     monthly_limit: f64,
 }
@@ -76,10 +92,11 @@ struct WslConfig {
     credentials_path: String,
 }
 
+// Security: AppConfig stores only non-sensitive data on disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
     #[serde(default)]
-    github: Option<GitHubConfig>,
+    github: Option<GitHubConfigStorable>,
     #[serde(default)]
     autostart_enabled: bool,
     #[serde(default)]
@@ -116,6 +133,7 @@ struct AppState {
 struct PollingControl {
     interval_tx: watch::Sender<u64>,
     refresh_notify: Notify,
+    shutdown_token: CancellationToken,
 }
 
 fn credentials_path() -> Result<PathBuf, String> {
@@ -148,6 +166,54 @@ fn write_app_config(config: &AppConfig) -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
     std::fs::write(&path, content)
         .map_err(|e| format!("Failed to write config: {}", e))
+}
+
+// Security: Save GitHub token to OS keyring (secure storage)
+fn save_github_token(username: &str, token: &str) -> Result<(), String> {
+    let entry = Entry::new("usage-dashboard-github", username)
+        .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
+    entry
+        .set_password(token)
+        .map_err(|e| format!("Failed to save token to keyring: {}", e))
+}
+
+// Security: Read GitHub token from OS keyring
+fn read_github_token(username: &str) -> Result<String, String> {
+    let entry = Entry::new("usage-dashboard-github", username)
+        .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
+    entry
+        .get_password()
+        .map_err(|e| format!("Failed to read token from keyring: {}", e))
+}
+
+// Security: Delete GitHub token from OS keyring
+#[allow(dead_code)]
+fn delete_github_token(username: &str) -> Result<(), String> {
+    let entry = Entry::new("usage-dashboard-github", username)
+        .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
+    entry
+        .delete_credential()
+        .map_err(|e| format!("Failed to delete token from keyring: {}", e))
+}
+
+// Read full GitHub config (combines storable config + token from keyring)
+fn read_github_config() -> Result<Option<GitHubConfig>, String> {
+    let config = read_app_config()?;
+    if let Some(gh_storable) = config.github {
+        match read_github_token(&gh_storable.username) {
+            Ok(token) => Ok(Some(GitHubConfig {
+                username: gh_storable.username,
+                token,
+                monthly_limit: gh_storable.monthly_limit,
+            })),
+            Err(_) => {
+                // Token not found in keyring, return None
+                Ok(None)
+            }
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 fn calculate_next_month_reset() -> String {
@@ -226,8 +292,8 @@ fn read_token_info_wsl(wsl_path: &str) -> Result<TokenInfo, String> {
     }
 
     // セキュリティ検証: パスの最大長チェック（DoS対策）
-    if wsl_path.len() > 500 {
-        return Err("WSL path is too long (max 500 characters)".to_string());
+    if wsl_path.len() > MAX_WSL_PATH_LENGTH {
+        return Err(format!("WSL path is too long (max {} characters)", MAX_WSL_PATH_LENGTH));
     }
 
     // パスが .credentials.json で終わっていない場合、自動的に追加
@@ -268,7 +334,7 @@ fn is_token_expired(expires_at: u64) -> bool {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    now_ms + 30_000 >= expires_at
+    now_ms + TOKEN_EXPIRATION_BUFFER_MS >= expires_at
 }
 
 async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageData, String> {
@@ -296,7 +362,7 @@ async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageData,
         .await
         .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-    let truncated: String = body.chars().take(500).collect();
+    let truncated: String = body.chars().take(MAX_RESPONSE_PREVIEW_CHARS).collect();
     serde_json::from_str::<UsageData>(&body).map_err(|e| {
         format!("Failed to parse response: {}. Body: {}", e, truncated)
     })
@@ -428,12 +494,19 @@ fn set_polling_interval(
 }
 
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle) {
+fn quit_app(app: tauri::AppHandle, control: tauri::State<'_, Arc<PollingControl>>) {
+    // Signal shutdown to all background tasks
+    control.shutdown_token.cancel();
+
+    // Give background tasks a brief moment to clean up
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
     app.exit(0);
 }
 
 #[tauri::command]
-fn get_github_config() -> Result<Option<GitHubConfig>, String> {
+fn get_github_config() -> Result<Option<GitHubConfigStorable>, String> {
+    // Security: Return only non-sensitive config (without token)
     Ok(read_app_config()?.github)
 }
 
@@ -443,12 +516,20 @@ fn save_github_config(
     token: String,
     monthly_limit: f64,
 ) -> Result<(), String> {
-    let mut config = read_app_config().unwrap_or(AppConfig { github: None, autostart_enabled: false, wsl: None });
-    config.github = Some(GitHubConfig {
+    // Security: Save token to OS keyring, username and monthly_limit to config file
+    save_github_token(&username, &token)?;
+
+    let mut config = read_app_config().unwrap_or(AppConfig {
+        github: None,
+        autostart_enabled: false,
+        wsl: None
+    });
+
+    config.github = Some(GitHubConfigStorable {
         username,
-        token,
         monthly_limit,
     });
+
     write_app_config(&config)?;
     Ok(())
 }
@@ -550,9 +631,11 @@ fn clear_wsl_config() -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (interval_tx, interval_rx) = watch::channel(60u64);
+    let shutdown_token = CancellationToken::new();
     let polling_control = Arc::new(PollingControl {
         interval_tx,
         refresh_notify: Notify::new(),
+        shutdown_token: shutdown_token.clone(),
     });
 
     let mut builder = tauri::Builder::default()
@@ -649,8 +732,8 @@ pub fn run() {
 
                     let claude_result = fetch_usage(&client, &token_info.access_token).await;
 
-                    // GitHub 設定を読み込み
-                    let github_config = read_app_config().ok().and_then(|c| c.github);
+                    // GitHub 設定を読み込み (Security: token is read from OS keyring)
+                    let github_config = read_github_config().ok().flatten();
 
                     // GitHub 使用量取得（設定がある場合のみ）
                     let copilot_result = if let Some(gh) = github_config {
@@ -691,7 +774,7 @@ pub fn run() {
                 // Immediate first fetch
                 do_fetch(&app_handle).await;
 
-                // Dynamic polling loop
+                // Dynamic polling loop with shutdown support
                 loop {
                     let secs = *interval_rx.borrow();
 
@@ -705,11 +788,16 @@ pub fn run() {
                         Ok(_) = interval_rx.changed() => {
                             continue;
                         }
+                        _ = pc.shutdown_token.cancelled() => {
+                            eprintln!("Polling loop shutting down...");
+                            break;
+                        }
                     }
                 }
             });
 
-            // Start credentials file watcher
+            // Start credentials file watcher with proper cleanup
+            let watcher_shutdown = watcher_pc.shutdown_token.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 if let Ok(cred_path) = credentials_path() {
                     if let Some(parent) = cred_path.parent() {
@@ -737,16 +825,35 @@ pub fn run() {
                         eprintln!("Watching credentials file: {}", cred_path.display());
 
                         loop {
-                            // Wait for file change, debounce with 1s timeout
-                            if rx.recv().is_ok() {
-                                // Drain any additional events within 1 second
-                                while rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok() {}
-                                eprintln!("Credentials file changed, triggering refresh...");
-                                watcher_pc.refresh_notify.notify_one();
-                            } else {
+                            // Check for shutdown signal with timeout
+                            if watcher_shutdown.is_cancelled() {
+                                eprintln!("File watcher shutting down...");
                                 break;
                             }
+
+                            // Wait for file change with timeout to allow periodic shutdown checks
+                            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                                Ok(_) => {
+                                    // Drain any additional events within 1 second
+                                    while rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok() {}
+                                    eprintln!("Credentials file changed, triggering refresh...");
+                                    watcher_pc.refresh_notify.notify_one();
+                                }
+                                Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                                    // Timeout is normal, continue to check shutdown signal
+                                    continue;
+                                }
+                                Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                                    // Channel closed, exit gracefully
+                                    eprintln!("File watcher channel disconnected");
+                                    break;
+                                }
+                            }
                         }
+
+                        // Explicit cleanup: drop the watcher to release resources
+                        drop(watcher);
+                        eprintln!("File watcher resources released");
                     }
                 }
             });

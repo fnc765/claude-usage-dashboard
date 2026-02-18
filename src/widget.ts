@@ -1,3 +1,9 @@
+// Security: XSS Prevention
+// IMPORTANT: Always use textContent instead of innerHTML when displaying data
+// If HTML rendering is absolutely necessary, use a sanitization library like DOMPurify
+
+import { USAGE_THRESHOLDS, TIME_WINDOWS, TIME_CONVERSION } from "./constants";
+
 export interface UsageMeter {
   utilization: number;
   resets_at: string | null;
@@ -47,8 +53,8 @@ interface BarElements {
 }
 
 function getThresholdClass(percent: number): string {
-  if (percent >= 80) return "critical";
-  if (percent >= 60) return "warning";
+  if (percent >= USAGE_THRESHOLDS.CRITICAL) return "critical";
+  if (percent >= USAGE_THRESHOLDS.WARNING) return "warning";
   return "";
 }
 
@@ -61,10 +67,10 @@ function formatRemaining(resetsAt: string | null): string {
 
   if (diffMs <= 0) return "resetting...";
 
-  const totalMin = Math.floor(diffMs / 60000);
-  const days = Math.floor(totalMin / 1440);
-  const hours = Math.floor((totalMin % 1440) / 60);
-  const minutes = totalMin % 60;
+  const totalMin = Math.floor(diffMs / TIME_CONVERSION.MS_PER_MINUTE);
+  const days = Math.floor(totalMin / TIME_CONVERSION.MINUTES_PER_DAY);
+  const hours = Math.floor((totalMin % TIME_CONVERSION.MINUTES_PER_DAY) / TIME_CONVERSION.MINUTES_PER_HOUR);
+  const minutes = totalMin % TIME_CONVERSION.MINUTES_PER_HOUR;
 
   if (days > 0) return `${days}d ${hours}h`;
   if (hours > 0) return `${hours}h ${minutes}m`;
@@ -80,7 +86,7 @@ function formatResetTime(resetsAt: string | null): string {
 
   if (diffMs <= 0) return "resetting...";
 
-  const totalHours = diffMs / 3600000;
+  const totalHours = diffMs / TIME_CONVERSION.MS_PER_HOUR;
   if (totalHours < 24) {
     return reset.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
   }
@@ -100,7 +106,7 @@ function calcTimeElapsedPercent(resetsAt: string | null, windowHours: number): n
   if (isNaN(reset.getTime())) return 0;
   const now = new Date();
   const remainMs = reset.getTime() - now.getTime();
-  const totalMs = windowHours * 3600000;
+  const totalMs = windowHours * TIME_CONVERSION.MS_PER_HOUR;
   const elapsed = totalMs - remainMs;
   return Math.max(0, Math.min(100, (elapsed / totalMs) * 100));
 }
@@ -217,8 +223,8 @@ export function updateWidget(data: CombinedUsageData) {
     detail: getElement("weekly-detail"),
   };
 
-  const sessionTimePercent = calcTimeElapsedPercent(data.claude.five_hour.resets_at, 5);
-  const weeklyTimePercent = calcTimeElapsedPercent(data.claude.seven_day.resets_at, 168);
+  const sessionTimePercent = calcTimeElapsedPercent(data.claude.five_hour.resets_at, TIME_WINDOWS.SESSION);
+  const weeklyTimePercent = calcTimeElapsedPercent(data.claude.seven_day.resets_at, TIME_WINDOWS.WEEKLY);
 
   updateBar(
     sessionElements,
