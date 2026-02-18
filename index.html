@@ -142,6 +142,21 @@
 
       <div class="menu-divider"></div>
 
+      <div class="menu-section">
+        <label class="menu-label">WSL Claude Settings</label>
+        <input
+          type="text"
+          id="wsl-credentials-path"
+          class="menu-input"
+          placeholder="\\wsl.localhost\Ubuntu-24.04\home\user\.claude"
+        />
+        <div class="menu-hint">Paste .claude folder path (auto-completes to .credentials.json)</div>
+        <button class="menu-btn" id="save-wsl-config">Save</button>
+        <button class="menu-btn menu-btn-secondary" id="clear-wsl-config" style="margin-top: 4px;">Clear</button>
+      </div>
+
+      <div class="menu-divider"></div>
+
       <button class="menu-item" id="force-refresh">
         <span class="menu-icon">&#8635;</span>
         Refresh Now

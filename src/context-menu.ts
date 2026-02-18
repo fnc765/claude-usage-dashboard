@@ -335,6 +335,61 @@ export function initContextMenu(): void {
       alert(`Failed to save settings: ${e}`);
     }
   });
+
+  // WSL 設定の読み込み
+  loadWslConfig();
+
+  // WSL 設定の保存
+  const saveWslBtn = getEl("save-wsl-config");
+  saveWslBtn.addEventListener("click", async () => {
+    const credentialsPath = (getEl("wsl-credentials-path") as HTMLInputElement).value.trim();
+
+    if (!credentialsPath) {
+      alert("WSL credentials path is required");
+      return;
+    }
+
+    // セキュリティ検証: WSL UNCパスであることを確認
+    if (!credentialsPath.startsWith("\\\\wsl.localhost\\") && !credentialsPath.startsWith("//wsl.localhost/")) {
+      alert("Invalid format. Path must start with \\\\wsl.localhost\\\nExample: \\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\.claude\\.credentials.json");
+      return;
+    }
+
+    // セキュリティ検証: パストラバーサル攻撃を防ぐ
+    if (credentialsPath.includes("..")) {
+      alert("Invalid path: Path traversal detected");
+      return;
+    }
+
+    // セキュリティ検証: パスの最大長チェック（DoS対策）
+    if (credentialsPath.length > 500) {
+      alert("Path is too long (max 500 characters)");
+      return;
+    }
+
+    try {
+      await invoke("save_wsl_config", {
+        credentialsPath,
+      });
+      alert("WSL settings saved successfully!");
+      await invoke("force_refresh");
+    } catch (e) {
+      alert(`Failed to save WSL settings: ${e}`);
+    }
+  });
+
+  // WSL 設定のクリア
+  const clearWslBtn = getEl("clear-wsl-config");
+  clearWslBtn.addEventListener("click", async () => {
+    try {
+      await invoke("clear_wsl_config");
+      (getEl("wsl-credentials-path") as HTMLInputElement).value = "";
+      alert("WSL settings cleared successfully!");
+      await invoke("force_refresh");
+    } catch (e) {
+      alert(`Failed to clear WSL settings: ${e}`);
+    }
+  });
 }
 
 async function loadGitHubConfig() {
@@ -349,6 +404,18 @@ async function loadGitHubConfig() {
     }
   } catch (e) {
     console.error("Failed to load GitHub config:", e);
+  }
+}
+
+async function loadWslConfig() {
+  try {
+    const config = await invoke("get_wsl_config") as any;
+    if (config) {
+      const pathEl = document.getElementById("wsl-credentials-path") as HTMLInputElement;
+      if (pathEl) pathEl.value = config.credentials_path || "";
+    }
+  } catch (e) {
+    console.error("Failed to load WSL config:", e);
   }
 }
 

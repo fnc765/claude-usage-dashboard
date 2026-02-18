@@ -71,11 +71,19 @@ fn default_monthly_limit() -> f64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WslConfig {
+    /// WSL内の認証情報パス (例: "\\wsl.localhost\Ubuntu-24.04\home\choco\.claude\.credentials.json")
+    credentials_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
     #[serde(default)]
     github: Option<GitHubConfig>,
     #[serde(default)]
     autostart_enabled: bool,
+    #[serde(default)]
+    wsl: Option<WslConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +134,7 @@ fn config_path() -> Result<PathBuf, String> {
 fn read_app_config() -> Result<AppConfig, String> {
     let path = config_path()?;
     if !path.exists() {
-        return Ok(AppConfig { github: None, autostart_enabled: false });
+        return Ok(AppConfig { github: None, autostart_enabled: false, wsl: None });
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
@@ -167,6 +175,31 @@ struct TokenInfo {
 }
 
 fn read_token_info() -> Result<TokenInfo, String> {
+    // まずWindows版を試す
+    match read_token_info_windows() {
+        Ok(token) => return Ok(token),
+        Err(windows_err) => {
+            // Windows版が失敗した場合、WSL版を試す
+            if let Ok(config) = read_app_config() {
+                if let Some(wsl_config) = config.wsl {
+                    match read_token_info_wsl(&wsl_config.credentials_path) {
+                        Ok(token) => return Ok(token),
+                        Err(wsl_err) => {
+                            // セキュリティ: 詳細なエラーはログに出力し、ユーザーには一般的なメッセージを表示
+                            eprintln!("Windows credential error: {}", windows_err);
+                            eprintln!("WSL credential error: {}", wsl_err);
+                            return Err("Failed to read credentials from both Windows and WSL. Please check your configuration.".to_string());
+                        }
+                    }
+                }
+            }
+            // WSL設定がない場合はWindows版のエラーを返す
+            Err(windows_err)
+        }
+    }
+}
+
+fn read_token_info_windows() -> Result<TokenInfo, String> {
     let path = credentials_path()?;
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read credentials: {}", e))?;
@@ -176,6 +209,58 @@ fn read_token_info() -> Result<TokenInfo, String> {
         access_token: creds.claude_ai_oauth.access_token,
         expires_at: creds.claude_ai_oauth.expires_at,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn read_token_info_wsl(wsl_path: &str) -> Result<TokenInfo, String> {
+    use std::path::Path;
+
+    // セキュリティ検証: WSL UNCパスであることを確認
+    if !wsl_path.starts_with("\\\\wsl.localhost\\") && !wsl_path.starts_with("//wsl.localhost/") {
+        return Err("WSL path must start with \\\\wsl.localhost\\".to_string());
+    }
+
+    // セキュリティ検証: パストラバーサル攻撃を防ぐ
+    if wsl_path.contains("..") {
+        return Err("Path traversal detected in WSL path".to_string());
+    }
+
+    // セキュリティ検証: パスの最大長チェック（DoS対策）
+    if wsl_path.len() > 500 {
+        return Err("WSL path is too long (max 500 characters)".to_string());
+    }
+
+    // パスが .credentials.json で終わっていない場合、自動的に追加
+    let path = Path::new(wsl_path);
+    let full_path = if path.extension().is_none() || path.file_name() == Some(std::ffi::OsStr::new(".claude")) {
+        // ディレクトリパスの場合、.credentials.json を追加
+        path.join(".credentials.json")
+    } else {
+        path.to_path_buf()
+    };
+
+    // セキュリティ検証: 最終的なパスが .credentials.json で終わることを確認
+    let path_str = full_path.to_string_lossy();
+    if !path_str.ends_with(".credentials.json") {
+        return Err("WSL credentials path must end with .credentials.json".to_string());
+    }
+
+    // UNCパスを読み取る
+    let content = std::fs::read_to_string(&full_path)
+        .map_err(|e| format!("Failed to read WSL credentials: {}", e))?;
+
+    let creds: Credentials = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse WSL credentials: {}", e))?;
+
+    Ok(TokenInfo {
+        access_token: creds.claude_ai_oauth.access_token,
+        expires_at: creds.claude_ai_oauth.expires_at,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_token_info_wsl(_wsl_path: &str) -> Result<TokenInfo, String> {
+    Err("WSL credentials are only supported on Windows".to_string())
 }
 
 fn is_token_expired(expires_at: u64) -> bool {
@@ -358,7 +443,7 @@ fn save_github_config(
     token: String,
     monthly_limit: f64,
 ) -> Result<(), String> {
-    let mut config = read_app_config().unwrap_or(AppConfig { github: None, autostart_enabled: false });
+    let mut config = read_app_config().unwrap_or(AppConfig { github: None, autostart_enabled: false, wsl: None });
     config.github = Some(GitHubConfig {
         username,
         token,
@@ -387,6 +472,7 @@ async fn enable_autostart(app: tauri::AppHandle) -> Result<(), String> {
     let mut config = read_app_config().unwrap_or(AppConfig {
         github: None,
         autostart_enabled: false,
+        wsl: None,
     });
     config.autostart_enabled = true;
     write_app_config(&config)?;
@@ -405,6 +491,7 @@ async fn disable_autostart(app: tauri::AppHandle) -> Result<(), String> {
     let mut config = read_app_config().unwrap_or(AppConfig {
         github: None,
         autostart_enabled: false,
+        wsl: None,
     });
     config.autostart_enabled = false;
     write_app_config(&config)?;
@@ -429,6 +516,35 @@ async fn enable_autostart(_app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(not(target_os = "windows"))]
 async fn disable_autostart(_app: tauri::AppHandle) -> Result<(), String> {
     Err("Autostart is only supported on Windows".to_string())
+}
+
+#[tauri::command]
+fn get_wsl_config() -> Result<Option<WslConfig>, String> {
+    Ok(read_app_config()?.wsl)
+}
+
+#[tauri::command]
+fn save_wsl_config(credentials_path: String) -> Result<(), String> {
+    let mut config = read_app_config().unwrap_or(AppConfig {
+        github: None,
+        autostart_enabled: false,
+        wsl: None,
+    });
+    config.wsl = Some(WslConfig { credentials_path });
+    write_app_config(&config)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_wsl_config() -> Result<(), String> {
+    let mut config = read_app_config().unwrap_or(AppConfig {
+        github: None,
+        autostart_enabled: false,
+        wsl: None,
+    });
+    config.wsl = None;
+    write_app_config(&config)?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -649,6 +765,9 @@ pub fn run() {
             is_autostart_enabled,
             enable_autostart,
             disable_autostart,
+            get_wsl_config,
+            save_wsl_config,
+            clear_wsl_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
