@@ -11,7 +11,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:coverage:rust": "cd src-tauri && cargo llvm-cov --html --output-dir ../coverage-rust",
+    "test:coverage:rust:text": "cd src-tauri && cargo llvm-cov",
+    "test:coverage:rust:lcov": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage-rust/lcov.info",
+    "test:coverage:all": "pnpm test:coverage && pnpm test:coverage:rust"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

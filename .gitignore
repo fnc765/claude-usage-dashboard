@@ -32,4 +32,5 @@ tmpclaude-*
 
 # Test coverage
 coverage/
+coverage-rust/
 LINUX_COMPATIBILITY_REPORT.md
