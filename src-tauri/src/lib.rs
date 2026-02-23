@@ -149,23 +149,31 @@ fn config_path() -> Result<PathBuf, String> {
     Ok(config_dir.join("config.json"))
 }
 
-fn read_app_config() -> Result<AppConfig, String> {
-    let path = config_path()?;
+fn read_config_from_path(path: &std::path::Path) -> Result<AppConfig, String> {
     if !path.exists() {
         return Ok(AppConfig { github: None, autostart_enabled: false, wsl: None });
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
     serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse config: {}", e))
 }
 
-fn write_app_config(config: &AppConfig) -> Result<(), String> {
+fn read_app_config() -> Result<AppConfig, String> {
     let path = config_path()?;
+    read_config_from_path(&path)
+}
+
+fn write_config_to_path(path: &std::path::Path, config: &AppConfig) -> Result<(), String> {
     let content = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    std::fs::write(&path, content)
+    std::fs::write(path, content)
         .map_err(|e| format!("Failed to write config: {}", e))
+}
+
+fn write_app_config(config: &AppConfig) -> Result<(), String> {
+    let path = config_path()?;
+    write_config_to_path(&path, config)
 }
 
 // Security: Save GitHub token to OS keyring (secure storage)
@@ -398,7 +406,11 @@ async fn fetch_copilot_usage(
     let body = resp.text().await
         .map_err(|e| format!("Failed to read GitHub response: {}", e))?;
 
-    let api_response: serde_json::Value = serde_json::from_str(&body)
+    parse_copilot_usage(&body, monthly_limit)
+}
+
+fn parse_copilot_usage(body: &str, monthly_limit: f64) -> Result<CopilotUsageData, String> {
+    let api_response: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| format!("Failed to parse GitHub response: {}", e))?;
 
     let items = api_response["usageItems"]
@@ -420,7 +432,11 @@ async fn fetch_copilot_usage(
         }
     }
 
-    let utilization = (total_requests / monthly_limit) * 100.0;
+    let utilization = if monthly_limit <= 0.0 {
+        0.0
+    } else {
+        (total_requests / monthly_limit) * 100.0
+    };
     let resets_at = calculate_next_month_reset();
 
     Ok(CopilotUsageData {
@@ -1073,12 +1089,126 @@ mod tests {
     }
 
     #[test]
-    fn test_read_app_config_nonexistent() {
-        // この関数は存在しないファイルに対してデフォルト値を返すべき
-        // 実際のファイルシステムに依存するため、モックが必要だが
-        // 少なくとも関数が呼び出し可能であることを確認
-        let result = read_app_config();
-        // エラーまたはデフォルト値が返される
-        assert!(result.is_ok() || result.is_err());
+    fn test_read_config_from_path_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        // 存在しないファイルの場合、デフォルト値を返す
+        let config = read_config_from_path(&path).unwrap();
+        assert!(config.github.is_none());
+        assert_eq!(config.autostart_enabled, false);
+        assert!(config.wsl.is_none());
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_response() {
+        let json = r#"{
+            "usageItems": [
+                { "model": "gpt-4o", "grossQuantity": 120.0 },
+                { "model": "claude-sonnet-4", "grossQuantity": 80.0 },
+                { "model": "gpt-4o-mini", "grossQuantity": 50.0 }
+            ]
+        }"#;
+        let result = parse_copilot_usage(json, 300.0).unwrap();
+
+        assert_eq!(result.total_requests, 250.0);
+        assert_eq!(result.monthly_limit, 300.0);
+        assert!((result.utilization - 83.333).abs() < 0.01);
+        assert_eq!(result.items.len(), 3);
+        assert_eq!(result.items[0].model, "gpt-4o");
+        assert_eq!(result.items[0].gross_quantity, 120.0);
+        assert_eq!(result.items[1].model, "claude-sonnet-4");
+        assert_eq!(result.items[2].gross_quantity, 50.0);
+        // resets_at は RFC3339 形式
+        assert!(chrono::DateTime::parse_from_rfc3339(&result.resets_at).is_ok());
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_zero_limit() {
+        let json = r#"{
+            "usageItems": [
+                { "model": "gpt-4o", "grossQuantity": 100.0 }
+            ]
+        }"#;
+        let result = parse_copilot_usage(json, 0.0).unwrap();
+        assert_eq!(result.total_requests, 100.0);
+        assert_eq!(result.monthly_limit, 0.0);
+        assert_eq!(result.utilization, 0.0);
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_empty_response() {
+        let json = r#"{ "usageItems": [] }"#;
+        let result = parse_copilot_usage(json, 300.0).unwrap();
+
+        assert_eq!(result.total_requests, 0.0);
+        assert_eq!(result.monthly_limit, 300.0);
+        assert_eq!(result.utilization, 0.0);
+        assert!(result.items.is_empty());
+    }
+
+    #[test]
+    fn test_write_and_read_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        let config = AppConfig {
+            github: Some(GitHubConfigStorable {
+                username: "roundtrip-user".to_string(),
+                monthly_limit: 500.0,
+            }),
+            autostart_enabled: true,
+            wsl: Some(WslConfig {
+                credentials_path: r"\\wsl.localhost\Ubuntu\home\u\.claude\.credentials.json"
+                    .to_string(),
+            }),
+        };
+
+        write_config_to_path(&path, &config).unwrap();
+        let loaded = read_config_from_path(&path).unwrap();
+
+        let gh = loaded.github.unwrap();
+        assert_eq!(gh.username, "roundtrip-user");
+        assert_eq!(gh.monthly_limit, 500.0);
+        assert_eq!(loaded.autostart_enabled, true);
+        assert!(loaded.wsl.unwrap().credentials_path.contains("wsl.localhost"));
+    }
+
+    #[test]
+    fn test_read_config_valid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        let json = r#"{
+            "github": { "username": "alice", "monthly_limit": 750.0 },
+            "autostart_enabled": false,
+            "wsl": { "credentials_path": "\\\\wsl.localhost\\Debian\\home\\a\\.claude\\.credentials.json" }
+        }"#;
+        std::fs::write(&path, json).unwrap();
+
+        let config = read_config_from_path(&path).unwrap();
+        let gh = config.github.unwrap();
+        assert_eq!(gh.username, "alice");
+        assert_eq!(gh.monthly_limit, 750.0);
+        assert_eq!(config.autostart_enabled, false);
+        assert!(config.wsl.unwrap().credentials_path.contains("Debian"));
+    }
+
+    #[test]
+    fn test_read_github_config_no_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        // github フィールドが None の設定を書き込む
+        let config = AppConfig {
+            github: None,
+            autostart_enabled: false,
+            wsl: None,
+        };
+        write_config_to_path(&path, &config).unwrap();
+
+        let loaded = read_config_from_path(&path).unwrap();
+        assert!(loaded.github.is_none());
+        assert_eq!(loaded.autostart_enabled, false);
+        assert!(loaded.wsl.is_none());
     }
 }

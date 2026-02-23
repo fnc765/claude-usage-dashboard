@@ -4663,6 +4663,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
  "tokio-util",
  "window-vibrancy 0.7.1",

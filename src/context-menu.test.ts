@@ -1,9 +1,14 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Settings } from './context-menu';
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+// Import runtime value (not just type) so the module is loaded and instrumented for coverage.
+import { initContextMenu, type Settings } from './context-menu';
+
+const { mockInvoke } = vi.hoisted(() => ({
+  mockInvoke: vi.fn(),
+}));
 
 // Mock Tauri API
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(),
+  invoke: mockInvoke,
 }));
 
 describe('context-menu.ts', () => {
@@ -215,6 +220,106 @@ describe('context-menu.ts', () => {
       const monthlyLimit = parseFloat(limitStr) || 300;
 
       expect(monthlyLimit).toBe(300);
+    });
+  });
+
+  describe('initContextMenu() behavior', () => {
+    function setupContextMenuDOM(): void {
+      document.body.innerHTML = `
+        <div class="widget"></div>
+        <div data-meter-type="claude-session"></div>
+        <div data-meter-type="claude-weekly"></div>
+        <div data-meter-type="copilot"></div>
+        <div id="empty-placeholder"></div>
+        <div id="context-menu" style="display:none">
+          <input id="opacity-slider" type="range" value="75" />
+          <span id="opacity-value">75%</span>
+          <span id="aot-check"></span>
+          <div id="toggle-aot"></div>
+          <div id="force-refresh"></div>
+          <div id="quit-app"></div>
+          <div id="toggle-claude-meters"></div>
+          <span id="claude-meters-check"></span>
+          <div id="toggle-copilot-meter"></div>
+          <span id="copilot-meter-check"></span>
+          <div id="toggle-autostart"></div>
+          <span id="autostart-check"></span>
+          <button id="save-github-config"></button>
+          <input id="github-username" />
+          <input id="github-token" />
+          <input id="monthly-limit" />
+          <button id="save-wsl-config"></button>
+          <input id="wsl-credentials-path" />
+          <button id="clear-wsl-config"></button>
+          <div data-effect="transparent"></div>
+          <div data-effect="mica" class="active"></div>
+          <div data-effect="acrylic"></div>
+          <div data-interval="30"></div>
+          <div data-interval="60" class="active"></div>
+        </div>
+      `;
+    }
+
+    beforeAll(() => {
+      localStorage.clear();
+      mockInvoke.mockReset();
+      setupContextMenuDOM();
+      initContextMenu();
+    });
+
+    beforeEach(() => {
+      // Reset menu visibility between tests
+      const menu = document.getElementById('context-menu');
+      if (menu) menu.style.display = 'none';
+      mockInvoke.mockClear();
+    });
+
+    it('should show context menu on right-click', () => {
+      const menu = document.getElementById('context-menu')!;
+      document.dispatchEvent(new MouseEvent('contextmenu', { clientX: 50, clientY: 50 }));
+      expect(menu.style.display).toBe('block');
+    });
+
+    it('should toggle context menu on repeated right-click', () => {
+      const menu = document.getElementById('context-menu')!;
+      // Show
+      document.dispatchEvent(new MouseEvent('contextmenu', { clientX: 50, clientY: 50 }));
+      expect(menu.style.display).toBe('block');
+      // Hide
+      document.dispatchEvent(new MouseEvent('contextmenu', { clientX: 50, clientY: 50 }));
+      expect(menu.style.display).toBe('none');
+    });
+
+    it('should hide context menu when clicking outside', () => {
+      const menu = document.getElementById('context-menu')!;
+      // Show first
+      document.dispatchEvent(new MouseEvent('contextmenu', { clientX: 50, clientY: 50 }));
+      expect(menu.style.display).toBe('block');
+      // Click outside the menu
+      document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      expect(menu.style.display).toBe('none');
+    });
+
+    it('should hide context menu on Escape key', () => {
+      const menu = document.getElementById('context-menu')!;
+      // Show first
+      document.dispatchEvent(new MouseEvent('contextmenu', { clientX: 50, clientY: 50 }));
+      expect(menu.style.display).toBe('block');
+      // Press Escape
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      expect(menu.style.display).toBe('none');
+    });
+
+    it('should call force_refresh on force-refresh click', async () => {
+      const forceRefresh = document.getElementById('force-refresh')!;
+      forceRefresh.click();
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+    });
+
+    it('should call quit_app on quit click', async () => {
+      const quitApp = document.getElementById('quit-app')!;
+      quitApp.click();
+      expect(mockInvoke).toHaveBeenCalledWith('quit_app');
     });
   });
 });

@@ -30,6 +30,9 @@ notify = "7"
 chrono = { version = "0.4", features = ["serde"] }
 keyring = "3"
 
+[dev-dependencies]
+tempfile = "3"
+
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.7"
 tauri-plugin-autostart = "2"

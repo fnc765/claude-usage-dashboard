@@ -1,13 +1,22 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { CombinedUsageData, CopilotUsageData } from './widget';
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { updateWidget, type CombinedUsageData, type CopilotUsageData } from './widget';
 
-// Mock Tauri API
-const mockInvoke = vi.fn();
-const mockListen = vi.fn();
-const mockStartDragging = vi.fn();
-const mockGetCurrentWindow = vi.fn(() => ({
-  startDragging: mockStartDragging,
-}));
+// Use vi.hoisted() so mock variables are initialized before hoisted vi.mock factories run.
+const { mockInvoke, mockListen, mockStartDragging, mockGetCurrentWindow, listenCallbacks } = vi.hoisted(() => {
+  const mockStartDragging = vi.fn();
+  const listenCallbacks: Record<string, Function> = {};
+  return {
+    mockInvoke: vi.fn(),
+    mockListen: vi.fn().mockImplementation(async (event: string, cb: Function) => {
+      listenCallbacks[event] = cb;
+    }),
+    mockStartDragging,
+    mockGetCurrentWindow: vi.fn(() => ({
+      startDragging: mockStartDragging,
+    })),
+    listenCallbacks,
+  };
+});
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: mockInvoke,
@@ -30,7 +39,29 @@ vi.mock('./context-menu', () => ({
   initContextMenu: vi.fn(),
 }));
 
+// Import the actual module so V8 instruments its code for coverage.
+// vi.mock() calls above are hoisted and active before this import runs.
+import './main';
+
 describe('main.ts', () => {
+  beforeAll(async () => {
+    // Set up DOM for DOMContentLoaded handler (initDrag, listen registrations)
+    document.body.innerHTML = `
+      <div data-tauri-drag-region>
+        <div class="bar-track"></div>
+        <button>Test Button</button>
+      </div>
+      <div id="token-status"></div>
+    `;
+    // Dispatch DOMContentLoaded to trigger main.ts initialization and capture listen callbacks
+    window.dispatchEvent(new Event('DOMContentLoaded'));
+    await vi.waitFor(() => {
+      if (Object.keys(listenCallbacks).length < 3) {
+        throw new Error('Listen callbacks not yet captured');
+      }
+    });
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     document.body.innerHTML = `
@@ -287,6 +318,82 @@ describe('main.ts', () => {
       expect(copilotData.monthly_limit).toBe(500);
       expect(copilotData.utilization).toBe(20);
       expect(copilotData.items).toHaveLength(2);
+    });
+  });
+
+  describe('Listener callback integration', () => {
+    const mockCombinedData: CombinedUsageData = {
+      claude: {
+        five_hour: {
+          utilization: 50,
+          resets_at: new Date(Date.now() + 3600000).toISOString(),
+        },
+        seven_day: {
+          utilization: 30,
+          resets_at: new Date(Date.now() + 3600000).toISOString(),
+        },
+      },
+      copilot: null,
+    };
+
+    it('usage-update callback calls updateWidget with payload', () => {
+      listenCallbacks['usage-update']({ payload: mockCombinedData });
+      expect(updateWidget).toHaveBeenCalledWith(mockCombinedData);
+    });
+
+    it('copilot-only-update callback merges copilot data and calls updateWidget', () => {
+      // Set latestData via usage-update first
+      listenCallbacks['usage-update']({ payload: { ...mockCombinedData } });
+      vi.mocked(updateWidget).mockClear();
+
+      const copilotPayload: CopilotUsageData = {
+        total_requests: 100,
+        monthly_limit: 500,
+        utilization: 20,
+        resets_at: new Date(Date.now() + 3600000).toISOString(),
+        items: [{ model: 'gpt-4', gross_quantity: 100 }],
+      };
+
+      listenCallbacks['copilot-only-update']({ payload: copilotPayload });
+      expect(updateWidget).toHaveBeenCalledTimes(1);
+      const arg = vi.mocked(updateWidget).mock.calls[0][0];
+      expect(arg.copilot).toEqual(copilotPayload);
+    });
+
+    describe('token-status callback', () => {
+      it('handles "expired" status', () => {
+        listenCallbacks['token-status']({ payload: 'expired' });
+        const el = document.getElementById('token-status')!;
+        expect(el.textContent).toBe('\u26a0 Token expired');
+        expect(el.className).toBe('token-status error');
+      });
+
+      it('handles "error" status', () => {
+        listenCallbacks['token-status']({ payload: 'error' });
+        const el = document.getElementById('token-status')!;
+        expect(el.textContent).toBe('\u26a0 No credentials');
+        expect(el.className).toBe('token-status error');
+      });
+
+      it('handles "fetch_error" status', () => {
+        listenCallbacks['token-status']({ payload: 'fetch_error' });
+        const el = document.getElementById('token-status')!;
+        expect(el.textContent).toBe('\u26a0 Fetch error');
+        expect(el.className).toBe('token-status warning');
+      });
+
+      it('handles "ok" status — clears text and class', () => {
+        listenCallbacks['token-status']({ payload: 'ok' });
+        const el = document.getElementById('token-status')!;
+        expect(el.textContent).toBe('');
+        expect(el.className).toBe('token-status');
+      });
+
+      it('does nothing when #token-status element is missing', () => {
+        document.getElementById('token-status')!.remove();
+        // Should not throw
+        expect(() => listenCallbacks['token-status']({ payload: 'expired' })).not.toThrow();
+      });
     });
   });
 });
