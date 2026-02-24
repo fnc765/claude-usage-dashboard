@@ -47,6 +47,7 @@ jobs:
 
       - name: Run Rust coverage
         run: |
+          mkdir -p coverage-rust
           cd src-tauri
           cargo llvm-cov --lcov --output-path ../coverage-rust/lcov.info
 
