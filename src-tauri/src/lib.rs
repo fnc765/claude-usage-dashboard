@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
+#[cfg(target_os = "windows")]
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::time::Duration;
