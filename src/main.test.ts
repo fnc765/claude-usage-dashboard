@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
-import { updateWidget, type CombinedUsageData, type CopilotUsageData } from './widget';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import { updateWidget, isExpired, type CombinedUsageData, type CopilotUsageData } from './widget';
 
 // Use vi.hoisted() so mock variables are initialized before hoisted vi.mock factories run.
 const { mockInvoke, mockListen, mockStartDragging, mockGetCurrentWindow, listenCallbacks } = vi.hoisted(() => {
@@ -394,6 +394,204 @@ describe('main.ts', () => {
         // Should not throw
         expect(() => listenCallbacks['token-status']({ payload: 'expired' })).not.toThrow();
       });
+    });
+  });
+
+  describe('copilot-error listener callback', () => {
+    it('updates #copilot-detail element with error message', () => {
+      document.body.innerHTML += '<div id="copilot-detail"></div>';
+      listenCallbacks['copilot-error']({ payload: 'API rate limit exceeded' });
+      const el = document.getElementById('copilot-detail')!;
+      expect(el.textContent).toBe('Error: API rate limit exceeded');
+      expect(el.title).toBe('API rate limit exceeded');
+    });
+
+    it('does not throw when #copilot-detail element is missing', () => {
+      // beforeEach DOM does not include #copilot-detail
+      expect(() =>
+        listenCallbacks['copilot-error']({ payload: 'some error' }),
+      ).not.toThrow();
+    });
+  });
+
+  describe('copilot-only-update edge case', () => {
+    it('does nothing when latestData is null', () => {
+      // Reset latestData to null via usage-update
+      listenCallbacks['usage-update']({ payload: null });
+      vi.mocked(updateWidget).mockClear();
+
+      const copilotPayload: CopilotUsageData = {
+        total_requests: 50,
+        monthly_limit: 300,
+        utilization: 16.7,
+        resets_at: new Date(Date.now() + 86400000).toISOString(),
+        items: [{ model: 'gpt-4', gross_quantity: 50 }],
+      };
+
+      listenCallbacks['copilot-only-update']({ payload: copilotPayload });
+      expect(updateWidget).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('fetchInitialData — UsageData response', () => {
+    it('wraps UsageData (with five_hour) in CombinedUsageData format', async () => {
+      vi.useFakeTimers();
+      const usageData = {
+        five_hour: {
+          utilization: 60,
+          resets_at: new Date(Date.now() + 3600000).toISOString(),
+        },
+        seven_day: {
+          utilization: 40,
+          resets_at: new Date(Date.now() + 86400000).toISOString(),
+        },
+      };
+      mockInvoke.mockResolvedValue(usageData);
+      vi.mocked(updateWidget).mockClear();
+
+      window.dispatchEvent(new Event('DOMContentLoaded'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(updateWidget).toHaveBeenCalled();
+      const calledWith = vi.mocked(updateWidget).mock.calls[0][0];
+      expect(calledWith.claude).toEqual(usageData);
+      expect(calledWith.copilot).toBeNull();
+      vi.useRealTimers();
+    });
+  });
+
+  describe('Drag — valid mousedown on drag-region', () => {
+    it('calls startDragging when clicking directly on drag region', async () => {
+      vi.useFakeTimers();
+      mockInvoke.mockRejectedValue(new Error('skip'));
+
+      // Re-dispatch DOMContentLoaded to attach drag listener to current DOM elements
+      window.dispatchEvent(new Event('DOMContentLoaded'));
+      await vi.advanceTimersByTimeAsync(0);
+      vi.clearAllMocks();
+
+      const dragRegion = document.querySelector('[data-tauri-drag-region]')!;
+      const mouseEvent = new MouseEvent('mousedown', {
+        button: 0,
+        bubbles: true,
+      });
+      Object.defineProperty(mouseEvent, 'target', {
+        value: dragRegion,
+        writable: false,
+      });
+      dragRegion.dispatchEvent(mouseEvent);
+
+      expect(mockStartDragging).toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+  });
+
+  describe('setInterval tick scenarios', () => {
+    const validData: CombinedUsageData = {
+      claude: {
+        five_hour: {
+          utilization: 50,
+          resets_at: new Date(Date.now() + 3600000).toISOString(),
+        },
+        seven_day: {
+          utilization: 30,
+          resets_at: new Date(Date.now() + 86400000).toISOString(),
+        },
+      },
+      copilot: {
+        total_requests: 100,
+        monthly_limit: 500,
+        utilization: 20,
+        resets_at: new Date(Date.now() + 86400000).toISOString(),
+        items: [{ model: 'gpt-4', gross_quantity: 100 }],
+      },
+    };
+
+    beforeEach(async () => {
+      vi.useFakeTimers();
+      mockInvoke.mockRejectedValue(new Error('skip'));
+
+      // Re-dispatch DOMContentLoaded to set up a new setInterval tracked by fake timers
+      window.dispatchEvent(new Event('DOMContentLoaded'));
+      await vi.advanceTimersByTimeAsync(0);
+      vi.clearAllMocks();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('does nothing when latestData is null (early return)', async () => {
+      // Ensure latestData is null
+      listenCallbacks['usage-update']({ payload: null });
+      vi.mocked(updateWidget).mockClear();
+
+      await vi.advanceTimersByTimeAsync(10000);
+
+      // updateWidget should NOT have been called by the interval
+      expect(updateWidget).not.toHaveBeenCalled();
+    });
+
+    it('calls force_refresh when session (five_hour) is expired', async () => {
+      listenCallbacks['usage-update']({ payload: { ...validData } });
+      vi.mocked(updateWidget).mockClear();
+      vi.mocked(isExpired)
+        .mockReturnValueOnce(true)   // sessionExpired
+        .mockReturnValueOnce(false)  // weeklyExpired
+        .mockReturnValueOnce(false); // copilotExpired
+      mockInvoke.mockResolvedValue(undefined);
+
+      await vi.advanceTimersByTimeAsync(10000);
+
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+    });
+
+    it('calls force_refresh when copilot is expired', async () => {
+      listenCallbacks['usage-update']({ payload: { ...validData } });
+      vi.mocked(updateWidget).mockClear();
+      vi.mocked(isExpired)
+        .mockReturnValueOnce(false)  // sessionExpired
+        .mockReturnValueOnce(false)  // weeklyExpired
+        .mockReturnValueOnce(true);  // copilotExpired
+      mockInvoke.mockResolvedValue(undefined);
+
+      await vi.advanceTimersByTimeAsync(10000);
+
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+    });
+
+    it('does not call force_refresh when refreshTriggered is already true', async () => {
+      // First tick: trigger refresh so refreshTriggered becomes true
+      listenCallbacks['usage-update']({ payload: { ...validData } });
+      vi.mocked(isExpired).mockReturnValue(true);
+      mockInvoke.mockResolvedValue(undefined);
+
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      mockInvoke.mockClear();
+
+      // Second tick: refreshTriggered is true, so force_refresh should NOT be called
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(mockInvoke).not.toHaveBeenCalledWith('force_refresh');
+    });
+
+    it('resets refreshTriggered when force_refresh rejects', async () => {
+      listenCallbacks['usage-update']({ payload: { ...validData } });
+      vi.mocked(isExpired).mockReturnValue(true);
+      mockInvoke.mockRejectedValue(new Error('refresh failed'));
+
+      // First tick: force_refresh is called and rejects → catch resets refreshTriggered
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+
+      // Flush the rejection handler microtask
+      await vi.advanceTimersByTimeAsync(0);
+      mockInvoke.mockClear();
+      mockInvoke.mockRejectedValue(new Error('refresh failed again'));
+
+      // Second tick: refreshTriggered was reset, so force_refresh should be called again
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
     });
   });
 });

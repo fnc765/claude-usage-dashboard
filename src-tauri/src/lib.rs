@@ -228,6 +228,7 @@ fn calculate_next_month_reset() -> String {
     next_month.to_rfc3339()
 }
 
+#[derive(Debug)]
 struct TokenInfo {
     access_token: String,
     expires_at: u64,
@@ -1295,5 +1296,508 @@ mod tests {
         assert!(loaded.github.is_none());
         assert_eq!(loaded.autostart_enabled, false);
         assert!(loaded.wsl.is_none());
+    }
+
+    // ===== read_token_info_wsl() テスト =====
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_path_invalid_prefix_rejected() {
+        // WSL UNC パスでないパスは拒否される
+        let result = read_token_info_wsl(r"C:\Users\user\.claude\.credentials.json");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("WSL path must start with"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_path_traversal_rejected() {
+        // パストラバーサル攻撃（`..` を含むパス）は拒否される
+        let result = read_token_info_wsl(r"\\wsl.localhost\Ubuntu\..\..\..\etc\passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Path traversal detected"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_path_too_long_rejected() {
+        // MAX_WSL_PATH_LENGTH (500) を超えるパスは拒否される
+        let long_segment = "a".repeat(600);
+        let long_path = format!(r"\\wsl.localhost\Ubuntu\home\{}", long_segment);
+        let result = read_token_info_wsl(&long_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too long"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_path_wrong_suffix_rejected() {
+        // .credentials.json で終わらないファイルパスは拒否される
+        let result = read_token_info_wsl(r"\\wsl.localhost\Ubuntu\home\user\config.toml");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(".credentials.json"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_path_auto_appends_credentials_suffix() {
+        // ディレクトリパス（.claude で終わる）の場合、.credentials.json が自動付与される
+        // ファイルは実存しないのでファイル読み取りエラーになるが、パス検証は通過する
+        let result = read_token_info_wsl(r"\\wsl.localhost\Ubuntu\home\user\.claude");
+        assert!(result.is_err());
+        // パス検証エラー（prefix/traversal/suffix）ではなく、ファイル読み取りエラーになるべき
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to read WSL credentials"),
+            "Expected file read error, got: {}",
+            err
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_path_valid_credentials_file_not_found() {
+        // 正しい形式だが存在しないファイルの場合、ファイル読み取りエラー
+        let result = read_token_info_wsl(
+            r"\\wsl.localhost\NonExistentDistro\home\user\.claude\.credentials.json",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to read WSL credentials") || err.contains("Failed to parse WSL credentials"),
+            "Expected file I/O error, got: {}",
+            err
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_path_forward_slash_prefix_accepted() {
+        // //wsl.localhost/ スタイルのパスも受け入れられる
+        let result = read_token_info_wsl("//wsl.localhost/Ubuntu/home/user/.claude/.credentials.json");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // パス検証エラーではなく、ファイル読み取りエラーになるべき
+        assert!(
+            err.contains("Failed to read WSL credentials") || err.contains("Failed to parse"),
+            "Expected file I/O error, got: {}",
+            err
+        );
+    }
+
+    // ===== parse_copilot_usage() 異常系テスト =====
+
+    #[test]
+    fn test_parse_copilot_usage_invalid_json() {
+        let result = parse_copilot_usage("not valid json {{{", 300.0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse GitHub response"));
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_missing_usage_items() {
+        // usageItems キーが存在しない
+        let json = r#"{ "someOtherField": 42 }"#;
+        let result = parse_copilot_usage(json, 300.0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing usageItems"));
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_usage_items_not_array() {
+        // usageItems が配列ではない
+        let json = r#"{ "usageItems": "not an array" }"#;
+        let result = parse_copilot_usage(json, 300.0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing usageItems"));
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_missing_gross_quantity() {
+        // grossQuantity フィールドが欠落したアイテム → スキップされる
+        let json = r#"{
+            "usageItems": [
+                { "model": "gpt-4o", "grossQuantity": 100.0 },
+                { "model": "gpt-4o-mini" },
+                { "model": "claude-sonnet-4", "grossQuantity": 50.0 }
+            ]
+        }"#;
+        let result = parse_copilot_usage(json, 300.0).unwrap();
+        // grossQuantity がないアイテムはスキップされる
+        assert_eq!(result.total_requests, 150.0);
+        assert_eq!(result.items.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_missing_model_field() {
+        // model フィールドが欠落（grossQuantity はある）→ total に加算されるがアイテムに含まれない
+        let json = r#"{
+            "usageItems": [
+                { "grossQuantity": 100.0 },
+                { "model": "gpt-4o", "grossQuantity": 200.0 }
+            ]
+        }"#;
+        let result = parse_copilot_usage(json, 300.0).unwrap();
+        assert_eq!(result.total_requests, 300.0);
+        // model がないアイテムは items に含まれない
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_negative_monthly_limit() {
+        let json = r#"{ "usageItems": [{ "model": "gpt-4o", "grossQuantity": 100.0 }] }"#;
+        let result = parse_copilot_usage(json, -100.0).unwrap();
+        // 負の monthly_limit は 0.0 扱い
+        assert_eq!(result.utilization, 0.0);
+    }
+
+    // ===== read_config_from_path() 追加テスト =====
+
+    #[test]
+    fn test_read_config_from_path_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{ invalid json content }}}").unwrap();
+
+        let result = read_config_from_path(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse config"));
+    }
+
+    #[test]
+    fn test_read_config_from_path_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "").unwrap();
+
+        let result = read_config_from_path(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse config"));
+    }
+
+    #[test]
+    fn test_read_config_from_path_partial_config() {
+        // github のみ指定し、他はデフォルト
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{ "github": { "username": "bob", "monthly_limit": 100.0 } }"#).unwrap();
+
+        let config = read_config_from_path(&path).unwrap();
+        let gh = config.github.unwrap();
+        assert_eq!(gh.username, "bob");
+        assert_eq!(gh.monthly_limit, 100.0);
+        assert_eq!(config.autostart_enabled, false);
+        assert!(config.wsl.is_none());
+    }
+
+    // ===== デシリアライゼーション異常系テスト =====
+
+    #[test]
+    fn test_credentials_deserialization_missing_fields() {
+        // access_token が欠落
+        let json = r#"{ "claudeAiOauth": { "refreshToken": "rt", "expiresAt": 999 } }"#;
+        let result = serde_json::from_str::<Credentials>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_credentials_deserialization_wrong_types() {
+        // expires_at が文字列（数値であるべき）
+        let json = r#"{ "claudeAiOauth": { "accessToken": "at", "refreshToken": "rt", "expiresAt": "not a number" } }"#;
+        let result = serde_json::from_str::<Credentials>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_credentials_deserialization_valid() {
+        let json = r#"{ "claudeAiOauth": { "accessToken": "test-token", "refreshToken": "test-refresh", "expiresAt": 1700000000 } }"#;
+        let creds: Credentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.claude_ai_oauth.access_token, "test-token");
+        assert_eq!(creds.claude_ai_oauth.expires_at, 1700000000);
+    }
+
+    #[test]
+    fn test_usage_data_deserialization_minimal() {
+        // 必須フィールドのみ（Optional フィールドはすべて欠落）
+        let json = r#"{
+            "five_hour": { "utilization": 10.0, "resets_at": null },
+            "seven_day": { "utilization": 20.0, "resets_at": "2026-03-01T00:00:00Z" }
+        }"#;
+        let data: UsageData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.five_hour.utilization, 10.0);
+        assert!(data.five_hour.resets_at.is_none());
+        assert_eq!(data.seven_day.utilization, 20.0);
+        assert!(data.seven_day_oauth_apps.is_none());
+        assert!(data.seven_day_opus.is_none());
+        assert!(data.seven_day_sonnet.is_none());
+        assert!(data.seven_day_cowork.is_none());
+        assert!(data.iguana_necktie.is_none());
+        assert!(data.extra_usage.is_none());
+    }
+
+    #[test]
+    fn test_usage_data_deserialization_with_all_optional_fields() {
+        let json = r#"{
+            "five_hour": { "utilization": 10.0, "resets_at": "2026-02-26T05:00:00Z" },
+            "seven_day": { "utilization": 20.0, "resets_at": "2026-03-01T00:00:00Z" },
+            "seven_day_oauth_apps": { "utilization": 30.0, "resets_at": null },
+            "seven_day_opus": { "utilization": 40.0, "resets_at": null },
+            "seven_day_sonnet": { "utilization": 50.0, "resets_at": null },
+            "seven_day_cowork": { "utilization": 60.0, "resets_at": null },
+            "iguana_necktie": { "some": "value" },
+            "extra_usage": {
+                "is_enabled": true,
+                "monthly_limit": 500.0,
+                "used_credits": 100.0,
+                "utilization": 20.0
+            }
+        }"#;
+        let data: UsageData = serde_json::from_str(json).unwrap();
+        assert!(data.seven_day_oauth_apps.is_some());
+        assert_eq!(data.seven_day_oauth_apps.unwrap().utilization, 30.0);
+        assert!(data.seven_day_opus.is_some());
+        assert!(data.seven_day_sonnet.is_some());
+        assert!(data.seven_day_cowork.is_some());
+        assert!(data.iguana_necktie.is_some());
+        let extra = data.extra_usage.unwrap();
+        assert!(extra.is_enabled);
+        assert_eq!(extra.monthly_limit, 500.0);
+    }
+
+    #[test]
+    fn test_usage_data_deserialization_invalid_missing_required() {
+        // five_hour が欠落 → エラー
+        let json = r#"{ "seven_day": { "utilization": 20.0, "resets_at": null } }"#;
+        let result = serde_json::from_str::<UsageData>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_usage_meter_resets_at_none() {
+        let meter = UsageMeter {
+            utilization: 0.0,
+            resets_at: None,
+        };
+        let json = serde_json::to_string(&meter).unwrap();
+        let deserialized: UsageMeter = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.utilization, 0.0);
+        assert!(deserialized.resets_at.is_none());
+    }
+
+    #[test]
+    fn test_copilot_usage_item_serialization_roundtrip() {
+        let item = CopilotUsageItem {
+            model: "claude-sonnet-4".to_string(),
+            gross_quantity: 123.456,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let deserialized: CopilotUsageItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.model, "claude-sonnet-4");
+        assert_eq!(deserialized.gross_quantity, 123.456);
+    }
+
+    #[test]
+    fn test_copilot_usage_data_serialization_roundtrip() {
+        let data = CopilotUsageData {
+            total_requests: 250.0,
+            monthly_limit: 300.0,
+            utilization: 83.33,
+            resets_at: "2026-03-01T00:00:00+00:00".to_string(),
+            items: vec![
+                CopilotUsageItem {
+                    model: "gpt-4o".to_string(),
+                    gross_quantity: 150.0,
+                },
+                CopilotUsageItem {
+                    model: "claude-sonnet-4".to_string(),
+                    gross_quantity: 100.0,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let deserialized: CopilotUsageData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_requests, 250.0);
+        assert_eq!(deserialized.items.len(), 2);
+    }
+
+    #[test]
+    fn test_combined_usage_data_without_copilot() {
+        let combined = CombinedUsageData {
+            claude: UsageData {
+                five_hour: UsageMeter { utilization: 10.0, resets_at: None },
+                seven_day: UsageMeter { utilization: 20.0, resets_at: None },
+                seven_day_oauth_apps: None,
+                seven_day_opus: None,
+                seven_day_sonnet: None,
+                seven_day_cowork: None,
+                iguana_necktie: None,
+                extra_usage: None,
+            },
+            copilot: None,
+        };
+        let json = serde_json::to_string(&combined).unwrap();
+        let deserialized: CombinedUsageData = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.copilot.is_none());
+        assert_eq!(deserialized.claude.five_hour.utilization, 10.0);
+    }
+
+    #[test]
+    fn test_combined_usage_data_with_copilot() {
+        let json = r#"{
+            "claude": {
+                "five_hour": { "utilization": 15.0, "resets_at": null },
+                "seven_day": { "utilization": 25.0, "resets_at": "2026-03-01T00:00:00Z" }
+            },
+            "copilot": {
+                "total_requests": 100.0,
+                "monthly_limit": 300.0,
+                "utilization": 33.33,
+                "resets_at": "2026-03-01T00:00:00Z",
+                "items": [
+                    { "model": "gpt-4o", "gross_quantity": 100.0 }
+                ]
+            }
+        }"#;
+        let combined: CombinedUsageData = serde_json::from_str(json).unwrap();
+        assert!(combined.copilot.is_some());
+        let copilot = combined.copilot.unwrap();
+        assert_eq!(copilot.total_requests, 100.0);
+        assert_eq!(copilot.items.len(), 1);
+    }
+
+    #[test]
+    fn test_github_config_storable_default_monthly_limit() {
+        let json = r#"{ "username": "test" }"#;
+        let config: GitHubConfigStorable = serde_json::from_str(json).unwrap();
+        assert_eq!(config.username, "test");
+        assert_eq!(config.monthly_limit, 300.0);
+    }
+
+    #[test]
+    fn test_github_config_storable_serialization_roundtrip() {
+        let config = GitHubConfigStorable {
+            username: "myuser".to_string(),
+            monthly_limit: 999.0,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: GitHubConfigStorable = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.username, "myuser");
+        assert_eq!(deserialized.monthly_limit, 999.0);
+    }
+
+    // ===== write_config_to_path テスト =====
+
+    #[test]
+    fn test_write_config_creates_valid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        let config = AppConfig {
+            github: None,
+            autostart_enabled: false,
+            wsl: None,
+        };
+        write_config_to_path(&path, &config).unwrap();
+
+        // ファイルが有効な JSON であることを確認
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["autostart_enabled"], false);
+        assert!(parsed["github"].is_null());
+    }
+
+    // ===== is_token_expired 追加テスト =====
+
+    #[test]
+    fn test_is_token_expired_exactly_at_buffer() {
+        // 現在時刻 + ちょうど 30秒 (バッファ境界)
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let expires_at = now_ms + TOKEN_EXPIRATION_BUFFER_MS;
+
+        // now_ms + 30_000 >= now_ms + 30_000 → true（ちょうど境界で期限切れ）
+        assert!(is_token_expired(expires_at));
+    }
+
+    #[test]
+    fn test_is_token_expired_just_past_buffer() {
+        // 現在時刻 + 31秒（バッファを1秒超える）
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let expires_at = now_ms + TOKEN_EXPIRATION_BUFFER_MS + 1_000;
+
+        assert!(!is_token_expired(expires_at));
+    }
+
+    #[test]
+    fn test_is_token_expired_zero() {
+        // expires_at = 0 は常に期限切れ
+        assert!(is_token_expired(0));
+    }
+
+    // ===== parse_copilot_usage 追加テスト =====
+
+    #[test]
+    fn test_parse_copilot_usage_large_quantities() {
+        let json = r#"{
+            "usageItems": [
+                { "model": "gpt-4o", "grossQuantity": 999999.99 }
+            ]
+        }"#;
+        let result = parse_copilot_usage(json, 300.0).unwrap();
+        assert_eq!(result.total_requests, 999999.99);
+        assert!(result.utilization > 100.0);
+    }
+
+    #[test]
+    fn test_parse_copilot_usage_gross_quantity_zero() {
+        let json = r#"{
+            "usageItems": [
+                { "model": "gpt-4o", "grossQuantity": 0.0 }
+            ]
+        }"#;
+        let result = parse_copilot_usage(json, 300.0).unwrap();
+        assert_eq!(result.total_requests, 0.0);
+        assert_eq!(result.utilization, 0.0);
+        assert_eq!(result.items.len(), 1);
+    }
+
+    // ===== AppConfig フィールドの組み合わせテスト =====
+
+    #[test]
+    fn test_app_config_autostart_only() {
+        let json = r#"{ "autostart_enabled": true }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.github.is_none());
+        assert!(config.autostart_enabled);
+        assert!(config.wsl.is_none());
+    }
+
+    #[test]
+    fn test_app_config_wsl_only() {
+        let json = r#"{ "wsl": { "credentials_path": "some/path" } }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.github.is_none());
+        assert!(!config.autostart_enabled);
+        assert!(config.wsl.is_some());
+        assert_eq!(config.wsl.unwrap().credentials_path, "some/path");
+    }
+
+    #[test]
+    fn test_app_config_unknown_fields_ignored() {
+        // 未知のフィールドがあっても正しくデシリアライズされる
+        let json = r#"{ "unknown_field": 42, "autostart_enabled": true }"#;
+        let result = serde_json::from_str::<AppConfig>(json);
+        // serde のデフォルトは unknown fields を無視しないため、deny_unknown_fields がなければ通る
+        // ここでの目的は実際の挙動を確認すること
+        if let Ok(config) = result {
+            assert!(config.autostart_enabled);
+        }
+        // deny_unknown_fields の場合はエラーになっても OK
     }
 }

@@ -321,5 +321,422 @@ describe('context-menu.ts', () => {
       quitApp.click();
       expect(mockInvoke).toHaveBeenCalledWith('quit_app');
     });
+
+    // --- Opacity slider input ---
+    it('should update opacity on slider input and save settings', () => {
+      const slider = document.getElementById('opacity-slider') as HTMLInputElement;
+      const opacityValue = document.getElementById('opacity-value')!;
+      const widget = document.querySelector('.widget') as HTMLElement;
+
+      slider.value = '50';
+      slider.dispatchEvent(new Event('input'));
+
+      expect(opacityValue.textContent).toBe('50%');
+      expect(widget.style.background).toContain('0.5');
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.opacity).toBe(50);
+    });
+
+    // --- Background effect button click ---
+    it('should invoke set_background_effect on effect button click', () => {
+      const acrylicBtn = document.querySelector('[data-effect="acrylic"]') as HTMLElement;
+      acrylicBtn.click();
+
+      expect(mockInvoke).toHaveBeenCalledWith('set_background_effect', { effect: 'acrylic' });
+      expect(acrylicBtn.classList.contains('active')).toBe(true);
+      const micaBtn = document.querySelector('[data-effect="mica"]') as HTMLElement;
+      expect(micaBtn.classList.contains('active')).toBe(false);
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.bgEffect).toBe('acrylic');
+    });
+
+    // --- Always on top toggle ---
+    it('should toggle always on top and invoke set_always_on_top', () => {
+      const toggleAot = document.getElementById('toggle-aot')!;
+      const aotCheck = document.getElementById('aot-check')!;
+
+      // Default: alwaysOnTop = true → toggle to false
+      toggleAot.click();
+
+      expect(mockInvoke).toHaveBeenCalledWith('set_always_on_top', { enabled: false });
+      expect(aotCheck.textContent).toBe('');
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.alwaysOnTop).toBe(false);
+    });
+
+    // --- Claude meters visibility toggle ---
+    it('should toggle Claude meters visibility and update DOM', () => {
+      const toggleClaudeMeters = document.getElementById('toggle-claude-meters')!;
+      const claudeMetersCheck = document.getElementById('claude-meters-check')!;
+      const sessionMeter = document.querySelector('[data-meter-type="claude-session"]')!;
+      const weeklyMeter = document.querySelector('[data-meter-type="claude-weekly"]')!;
+
+      // Default: showClaudeMeters = true → toggle to false
+      toggleClaudeMeters.click();
+
+      expect(claudeMetersCheck.textContent).toBe('');
+      expect(sessionMeter.classList.contains('hidden')).toBe(true);
+      expect(weeklyMeter.classList.contains('hidden')).toBe(true);
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.showClaudeMeters).toBe(false);
+    });
+
+    // --- Copilot meter visibility toggle ---
+    it('should toggle Copilot meter visibility and update DOM', () => {
+      const toggleCopilotMeter = document.getElementById('toggle-copilot-meter')!;
+      const copilotMeterCheck = document.getElementById('copilot-meter-check')!;
+      const copilotMeter = document.querySelector('[data-meter-type="copilot"]')!;
+
+      // Default: showCopilotMeter = true → toggle to false
+      toggleCopilotMeter.click();
+
+      expect(copilotMeterCheck.textContent).toBe('');
+      expect(copilotMeter.classList.contains('hidden')).toBe(true);
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.showCopilotMeter).toBe(false);
+    });
+
+    // --- All meters hidden → placeholder shown ---
+    it('should show placeholder when all meters are hidden', () => {
+      // After Claude + Copilot toggles above, both are false
+      const placeholder = document.getElementById('empty-placeholder')!;
+      expect(placeholder.style.display).toBe('flex');
+    });
+
+    // --- Polling interval button click ---
+    it('should invoke set_polling_interval on interval button click', () => {
+      const btn30 = document.querySelector('[data-interval="30"]') as HTMLElement;
+      btn30.click();
+
+      expect(mockInvoke).toHaveBeenCalledWith('set_polling_interval', { seconds: 30 });
+      expect(btn30.classList.contains('active')).toBe(true);
+      const btn60 = document.querySelector('[data-interval="60"]') as HTMLElement;
+      expect(btn60.classList.contains('active')).toBe(false);
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.pollingInterval).toBe(30);
+    });
+
+    // --- Autostart toggle (enable) ---
+    it('should enable autostart on toggle click', async () => {
+      const toggleAutostart = document.getElementById('toggle-autostart')!;
+      const autostartCheck = document.getElementById('autostart-check')!;
+
+      // Current state: autostartEnabled = false → enable
+      toggleAutostart.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(mockInvoke).toHaveBeenCalledWith('enable_autostart');
+      expect(autostartCheck.textContent).toBe('\u2713');
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.autostartEnabled).toBe(true);
+    });
+
+    // --- Autostart toggle (disable) ---
+    it('should disable autostart on second toggle click', async () => {
+      const toggleAutostart = document.getElementById('toggle-autostart')!;
+      const autostartCheck = document.getElementById('autostart-check')!;
+
+      // Current state: autostartEnabled = true (from previous test) → disable
+      toggleAutostart.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(mockInvoke).toHaveBeenCalledWith('disable_autostart');
+      expect(autostartCheck.textContent).toBe('');
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.autostartEnabled).toBe(false);
+    });
+
+    // --- GitHub config save: empty fields ---
+    it('should show alert for empty GitHub fields', () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const saveBtn = document.getElementById('save-github-config')!;
+      (document.getElementById('github-username') as HTMLInputElement).value = '';
+      (document.getElementById('github-token') as HTMLInputElement).value = '';
+
+      saveBtn.click();
+
+      expect(mockAlert).toHaveBeenCalledWith('Username and Token are required');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    // --- GitHub config save: validation success ---
+    it('should save GitHub config on successful validation', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const saveBtn = document.getElementById('save-github-config')!;
+      (document.getElementById('github-username') as HTMLInputElement).value = 'testuser';
+      (document.getElementById('github-token') as HTMLInputElement).value = 'ghp_test123';
+      (document.getElementById('monthly-limit') as HTMLInputElement).value = '500';
+
+      saveBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(mockInvoke).toHaveBeenCalledWith('validate_github_token', {
+        username: 'testuser',
+        token: 'ghp_test123',
+      });
+      expect(mockInvoke).toHaveBeenCalledWith('save_github_config', {
+        username: 'testuser',
+        token: 'ghp_test123',
+        monthlyLimit: 500,
+      });
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockAlert).toHaveBeenCalledWith('GitHub token verified and saved successfully!');
+    });
+
+    // --- GitHub config save: token validation failure ---
+    it('should show alert on token validation failure', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const saveBtn = document.getElementById('save-github-config')!;
+      (document.getElementById('github-username') as HTMLInputElement).value = 'testuser';
+      (document.getElementById('github-token') as HTMLInputElement).value = 'bad-token';
+
+      mockInvoke.mockRejectedValueOnce('Invalid token');
+
+      saveBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(mockInvoke).toHaveBeenCalledWith('validate_github_token', {
+        username: 'testuser',
+        token: 'bad-token',
+      });
+      expect(mockAlert).toHaveBeenCalledWith('Token validation failed: Invalid token');
+      expect(mockInvoke).not.toHaveBeenCalledWith('save_github_config', expect.anything());
+    });
+
+    // --- WSL config save: empty path ---
+    it('should show alert for empty WSL path', () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = '';
+
+      saveWslBtn.click();
+
+      expect(mockAlert).toHaveBeenCalledWith('WSL credentials path is required');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    // --- WSL config save: invalid path format ---
+    it('should show alert for invalid WSL path format', () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = 'C:\\Users\\test';
+
+      saveWslBtn.click();
+
+      expect(mockAlert).toHaveBeenCalledWith(expect.stringContaining('Invalid format'));
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    // --- WSL config save: path traversal ---
+    it('should show alert for WSL path with path traversal', () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value =
+        '\\\\wsl.localhost\\Ubuntu\\..\\..\\etc\\passwd';
+
+      saveWslBtn.click();
+
+      expect(mockAlert).toHaveBeenCalledWith('Invalid path: Path traversal detected');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    // --- WSL config save: path too long ---
+    it('should show alert for WSL path that is too long', () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const longPath = '\\\\wsl.localhost\\' + 'a'.repeat(500);
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = longPath;
+
+      saveWslBtn.click();
+
+      expect(mockAlert).toHaveBeenCalledWith(expect.stringContaining('Path is too long'));
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    // --- WSL config save: valid path ---
+    it('should save WSL config with valid path', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const validPath = '\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\.claude\\.credentials.json';
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = validPath;
+
+      saveWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
+        credentialsPath: validPath,
+      });
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockAlert).toHaveBeenCalledWith('WSL settings saved successfully!');
+    });
+
+    // --- WSL config clear ---
+    it('should clear WSL config', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      const clearWslBtn = document.getElementById('clear-wsl-config')!;
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = 'some-path';
+
+      clearWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(mockInvoke).toHaveBeenCalledWith('clear_wsl_config');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect((document.getElementById('wsl-credentials-path') as HTMLInputElement).value).toBe('');
+      expect(mockAlert).toHaveBeenCalledWith('WSL settings cleared successfully!');
+    });
+  });
+
+  describe('init-time loading behavior', () => {
+    function setupDOM(): void {
+      document.body.innerHTML = `
+        <div class="widget"></div>
+        <div data-meter-type="claude-session"></div>
+        <div data-meter-type="claude-weekly"></div>
+        <div data-meter-type="copilot"></div>
+        <div id="empty-placeholder"></div>
+        <div id="context-menu" style="display:none">
+          <input id="opacity-slider" type="range" value="75" />
+          <span id="opacity-value">75%</span>
+          <span id="aot-check"></span>
+          <div id="toggle-aot"></div>
+          <div id="force-refresh"></div>
+          <div id="quit-app"></div>
+          <div id="toggle-claude-meters"></div>
+          <span id="claude-meters-check"></span>
+          <div id="toggle-copilot-meter"></div>
+          <span id="copilot-meter-check"></span>
+          <div id="toggle-autostart"></div>
+          <span id="autostart-check"></span>
+          <button id="save-github-config"></button>
+          <input id="github-username" />
+          <input id="github-token" />
+          <input id="monthly-limit" />
+          <button id="save-wsl-config"></button>
+          <input id="wsl-credentials-path" />
+          <button id="clear-wsl-config"></button>
+          <div data-effect="transparent"></div>
+          <div data-effect="mica" class="active"></div>
+          <div data-effect="acrylic"></div>
+          <div data-interval="30"></div>
+          <div data-interval="60" class="active"></div>
+        </div>
+      `;
+    }
+
+    beforeEach(() => {
+      localStorage.clear();
+      mockInvoke.mockReset();
+      setupDOM();
+    });
+
+    it('should load GitHub config on init', async () => {
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_github_config') {
+          return Promise.resolve({ username: 'octocat', monthly_limit: 500 });
+        }
+        return Promise.resolve();
+      });
+
+      initContextMenu();
+      await new Promise(r => setTimeout(r, 0));
+
+      const usernameEl = document.getElementById('github-username') as HTMLInputElement;
+      const limitEl = document.getElementById('monthly-limit') as HTMLInputElement;
+      expect(usernameEl.value).toBe('octocat');
+      expect(limitEl.value).toBe('500');
+    });
+
+    it('should load WSL config on init', async () => {
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_wsl_config') {
+          return Promise.resolve({
+            credentials_path: '\\\\wsl.localhost\\Ubuntu\\home\\user\\.claude\\.credentials.json',
+          });
+        }
+        return Promise.resolve();
+      });
+
+      initContextMenu();
+      await new Promise(r => setTimeout(r, 0));
+
+      const pathEl = document.getElementById('wsl-credentials-path') as HTMLInputElement;
+      expect(pathEl.value).toBe('\\\\wsl.localhost\\Ubuntu\\home\\user\\.claude\\.credentials.json');
+    });
+
+    it('should load autostart status (enabled) on init', async () => {
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'is_autostart_enabled') return Promise.resolve(true);
+        return Promise.resolve();
+      });
+
+      initContextMenu();
+      await new Promise(r => setTimeout(r, 0));
+
+      const autostartCheck = document.getElementById('autostart-check')!;
+      expect(autostartCheck.textContent).toBe('\u2713');
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.autostartEnabled).toBe(true);
+    });
+
+    it('should load autostart status (disabled) on init', async () => {
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'is_autostart_enabled') return Promise.resolve(false);
+        return Promise.resolve();
+      });
+
+      initContextMenu();
+      await new Promise(r => setTimeout(r, 0));
+
+      const autostartCheck = document.getElementById('autostart-check')!;
+      expect(autostartCheck.textContent).toBe('');
+      const saved = JSON.parse(localStorage.getItem('widget-settings') || '{}');
+      expect(saved.autostartEnabled).toBe(false);
+    });
+
+    it('should load saved settings from localStorage', () => {
+      const customSettings = {
+        opacity: 90,
+        bgEffect: 'acrylic',
+        alwaysOnTop: false,
+        pollingInterval: 120,
+        showClaudeMeters: false,
+        showCopilotMeter: false,
+        autostartEnabled: true,
+      };
+      localStorage.setItem('widget-settings', JSON.stringify(customSettings));
+
+      initContextMenu();
+
+      const slider = document.getElementById('opacity-slider') as HTMLInputElement;
+      expect(slider.value).toBe('90');
+      const opacityValue = document.getElementById('opacity-value')!;
+      expect(opacityValue.textContent).toBe('90%');
+      const widget = document.querySelector('.widget') as HTMLElement;
+      expect(widget.style.background).toContain('0.9');
+      const aotCheck = document.getElementById('aot-check')!;
+      expect(aotCheck.textContent).toBe('');
+      const acrylicBtn = document.querySelector('[data-effect="acrylic"]') as HTMLElement;
+      expect(acrylicBtn.classList.contains('active')).toBe(true);
+    });
+
+    it('should use defaults when localStorage has corrupted JSON', () => {
+      localStorage.setItem('widget-settings', 'not-valid-json{{{');
+
+      initContextMenu();
+
+      const slider = document.getElementById('opacity-slider') as HTMLInputElement;
+      expect(slider.value).toBe('75');
+      const opacityValue = document.getElementById('opacity-value')!;
+      expect(opacityValue.textContent).toBe('75%');
+    });
   });
 });
