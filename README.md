@@ -17,8 +17,8 @@ Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視�
 - リセットまでの残り時間をカウントダウン表示
 - リセット時刻の到達を検知して自動リフレッシュ
 
-### GitHub Copilot 使用量監視
-- **月間使用量** (300プレミアムリクエスト) をプログレスバーで表示
+### GitHub Copilot 使用量監視（オプション）
+- **月間使用量**をプログレスバーで表示
 - GitHub Personal Access Token による認証
 - 緑系の色スキームで Claude とは視覚的に区別
 - Context Menu から GitHub PAT を設定可能
@@ -26,7 +26,7 @@ Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視�
 ### カスタマイズ・操作
 - **メーター表示切替**: Claude メーター・Copilot メーター を個別に表示/非表示可能
   - 設定は localStorage に永続化され、アプリ再起動後も保持される
-- **自動起動**: Windows ログイン時に自動的にアプリを起動 (Windows専用)
+- **自動起動**: ログイン時に自動的にアプリを起動
   - Context Menu から有効/無効を切り替え可能
 - 常に最前面に表示 (トグル可)
 - ウィンドウの透過度・背景エフェクト (Mica / Acrylic) のカスタマイズ
@@ -38,15 +38,17 @@ Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視�
 
 - **Windows** (Windows 10/11)
 - **Linux** (Ubuntu, Debian, Fedora など)
-- **macOS** (実験的)
+- **macOS** (keyring は `apple-native` 実装済み・動作未検証)
 
-### Linux / WSL での使用について
+### WSL での使用について
 
-- **WSL内のClaude Code**: WSL環境でClaude Codeを使用している場合、WSL内で本アプリをビルド・実行してください
-- **認証ファイルの場所**: `~/.claude/.credentials.json`（Linux/WSLのホームディレクトリ）
-- **制限事項**:
-  - Window Vibrancy（背景エフェクト）はWindows専用です
-  - 自動起動機能はWindows専用です
+- **WSL内のClaude Code**: WSL環境でClaude Codeを使用している場合、WSLの認証ファイルを右クリックメニューから指定してください
+- **認証ファイルのパス形式**: UNC 形式で指定する必要があります
+  ```
+  \\wsl.localhost\<ディストリビューション名>\home\<ユーザー名>\.claude\.credentials.json
+  ```
+  例: `\\wsl.localhost\Ubuntu-24.04\home\user\.claude\.credentials.json`
+- 入力後、コンテキストメニュー内の **Save** ボタンをクリックして保存してください
 
 ## 前提条件
 
@@ -70,7 +72,8 @@ Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視�
 
 ```bash
 # 1. GitHubのReleaseページから.debファイルをダウンロード
-wget https://github.com/<your-username>/usage-dashboard/releases/latest/download/usage-dashboard_0.1.0_amd64.deb
+#    https://github.com/のリリースページから最新の .deb ファイルを取得してください
+wget <release-url>/usage-dashboard_0.1.0_amd64.deb
 
 # 2. インストール
 sudo dpkg -i usage-dashboard_0.1.0_amd64.deb
@@ -86,7 +89,8 @@ usage-dashboard
 
 ```bash
 # 1. AppImageをダウンロード
-wget https://github.com/<your-username>/usage-dashboard/releases/latest/download/usage-dashboard_0.1.0_amd64.AppImage
+#    GitHubのReleaseページから最新の .AppImage ファイルを取得してください
+wget <release-url>/usage-dashboard_0.1.0_amd64.AppImage
 
 # 2. 実行権限を付与
 chmod +x usage-dashboard_0.1.0_amd64.AppImage
@@ -97,7 +101,7 @@ chmod +x usage-dashboard_0.1.0_amd64.AppImage
 
 #### Windows
 
-[GitHubのReleaseページ](https://github.com/<your-username>/usage-dashboard/releases)から `.msi` インストーラーをダウンロードして実行してください。
+GitHub のリリースページから `.msi` インストーラーをダウンロードして実行してください。
 
 ### 方法2: ソースからビルド
 
@@ -125,7 +129,7 @@ pnpm tauri build
    - ポーリング間隔
    - 手動リフレッシュ
    - **メーター表示切替**: Claude メーター / GitHub Copilot メーター を個別に表示/非表示
-   - **自動起動設定**: ログイン時の自動起動を ON/OFF ※Windows専用
+   - **自動起動設定**: ログイン時の自動起動を ON/OFF
 4. システムトレイアイコンからウィジェットの表示/非表示を切り替えられます
 
 ### GitHub Copilot の設定 (オプション)
@@ -134,9 +138,37 @@ GitHub Copilot の使用量を監視したい場合:
 
 1. [GitHub Settings](https://github.com/settings/tokens) で Personal Access Token (PAT) を生成
    - スコープ: `copilot` 権限を付与
-2. ウィジェットを **右クリック** → **"Configure GitHub Copilot"** を選択
-3. 生成した PAT を入力して保存
-4. 設定は `~/.usage-dashboard/config.json` に保存されます
+2. ウィジェットを **右クリック** してコンテキストメニューを開く
+3. メニュー内の GitHub Copilot セクションで以下を入力する:
+   - **Username**: GitHub ユーザー名
+   - **Token**: 生成した PAT
+   - **Monthly Limit**: 月間の上限使用量（デフォルト: 300）
+4. **Save** ボタンをクリックして保存
+
+> トークンは OS キーリング（Windows: Windows Credential Manager、macOS: Keychain、Linux: Secret Service）に安全に保存されます。`config.json` には書き込まれません。
+
+## データの保存場所
+
+| データ種別 | 保存先 |
+|-----------|-------|
+| アプリ設定 (WSL パス、GitHub ユーザー名など) | `~/.usage-dashboard/config.json` |
+| GitHub PAT (トークン) | OS キーリング (Windows Credential Manager / macOS Keychain / Linux Secret Service) |
+| UI 設定 (透過度、表示切替など) | `localStorage` (アプリ内) |
+
+## テスト
+
+```bash
+# フロントエンド (TypeScript)
+pnpm test                       # 単体テスト
+pnpm test:coverage              # カバレッジ付き
+
+# バックエンド (Rust)
+pnpm test:coverage:rust:text    # カバレッジ (テキスト)
+pnpm test:coverage:rust         # カバレッジ (HTML出力 → coverage-rust/)
+
+# 両方まとめて実行
+pnpm test:coverage:all
+```
 
 ## 技術スタック
 
