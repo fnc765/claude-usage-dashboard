@@ -337,13 +337,22 @@ export function initContextMenu(): void {
       return;
     }
 
+    // トークンの認証確認（GitHub API で検証）
+    try {
+      await invoke("validate_github_token", { username, token });
+    } catch (e) {
+      alert(`Token validation failed: ${e}`);
+      return;
+    }
+
+    // 検証成功後に保存
     try {
       await invoke("save_github_config", {
         username,
         token,
         monthlyLimit,
       });
-      alert("Settings saved successfully!");
+      alert("GitHub token verified and saved successfully!");
       await invoke("force_refresh");
     } catch (e) {
       alert(`Failed to save settings: ${e}`);

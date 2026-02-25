@@ -129,6 +129,8 @@ struct CombinedUsageData {
 struct AppState {
     latest_usage: Option<UsageData>,
     http_client: reqwest::Client,
+    /// キーリング読み込み失敗時のフォールバック用メモリキャッシュ
+    github_token_cache: Option<String>,
 }
 
 struct PollingControl {
@@ -183,16 +185,18 @@ fn save_github_token(username: &str, token: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
     entry
         .set_password(token)
-        .map_err(|e| format!("Failed to save token to keyring: {}", e))
+        .map_err(|e| format!("Failed to save token to keyring: {}", e))?;
+    Ok(())
 }
 
 // Security: Read GitHub token from OS keyring
 fn read_github_token(username: &str) -> Result<String, String> {
     let entry = Entry::new("usage-dashboard-github", username)
         .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
-    entry
-        .get_password()
-        .map_err(|e| format!("Failed to read token from keyring: {}", e))
+    match entry.get_password() {
+        Ok(token) => Ok(token),
+        Err(e) => Err(format!("Failed to read token from keyring: {}", e)),
+    }
 }
 
 // Security: Delete GitHub token from OS keyring
@@ -203,26 +207,6 @@ fn delete_github_token(username: &str) -> Result<(), String> {
     entry
         .delete_credential()
         .map_err(|e| format!("Failed to delete token from keyring: {}", e))
-}
-
-// Read full GitHub config (combines storable config + token from keyring)
-fn read_github_config() -> Result<Option<GitHubConfig>, String> {
-    let config = read_app_config()?;
-    if let Some(gh_storable) = config.github {
-        match read_github_token(&gh_storable.username) {
-            Ok(token) => Ok(Some(GitHubConfig {
-                username: gh_storable.username,
-                token,
-                monthly_limit: gh_storable.monthly_limit,
-            })),
-            Err(_) => {
-                // Token not found in keyring, return None
-                Ok(None)
-            }
-        }
-    } else {
-        Ok(None)
-    }
 }
 
 fn calculate_next_month_reset() -> String {
@@ -401,7 +385,11 @@ async fn fetch_copilot_usage(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".into());
-        return Err(format!("GitHub API status {}: {}", status, body));
+        let error_msg = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["message"].as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "<API error>".to_string());
+        return Err(format!("GitHub API status {}: {}", status, error_msg));
     }
 
     let body = resp.text().await
@@ -528,18 +516,28 @@ fn get_github_config() -> Result<Option<GitHubConfigStorable>, String> {
 }
 
 #[tauri::command]
-fn save_github_config(
+async fn save_github_config(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
     username: String,
     token: String,
     monthly_limit: f64,
 ) -> Result<(), String> {
     // Security: Save token to OS keyring, username and monthly_limit to config file
-    save_github_token(&username, &token)?;
+    // keyring への保存は失敗しても続行（メモリキャッシュで補完）
+    if let Err(e) = save_github_token(&username, &token) {
+        eprintln!("[WARN] keyring save failed (will use memory cache): {}", e);
+    }
+
+    // メモリキャッシュを更新（keyring が機能しない環境のフォールバック）
+    {
+        let mut s = state.lock().await;
+        s.github_token_cache = Some(token.clone());
+    }
 
     let mut config = read_app_config().unwrap_or(AppConfig {
         github: None,
         autostart_enabled: false,
-        wsl: None
+        wsl: None,
     });
 
     config.github = Some(GitHubConfigStorable {
@@ -617,6 +615,45 @@ async fn disable_autostart(_app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn validate_github_token(username: String, token: String) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Client error: {}", e))?;
+
+    let resp = client
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("token {}", token))
+        .header("User-Agent", "usage-dashboard")
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+
+    if resp.status() == 401 {
+        return Err("Invalid token: authentication failed (401)".to_string());
+    } else if resp.status() == 403 {
+        return Err("Token does not have required permissions (403)".to_string());
+    } else if !resp.status().is_success() {
+        return Err(format!("GitHub API error: {}", resp.status()));
+    }
+
+    // トークンの実際の所有者を検証
+    let user_data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| "Failed to parse user response".to_string())?;
+    let actual_login = user_data["login"].as_str().unwrap_or("");
+    if !actual_login.eq_ignore_ascii_case(&username) {
+        return Err(format!(
+            "Token belongs to '{}', not '{}'",
+            actual_login, username
+        ));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn get_wsl_config() -> Result<Option<WslConfig>, String> {
     Ok(read_app_config()?.wsl)
 }
@@ -669,6 +706,7 @@ pub fn run() {
     builder
         .manage(Arc::new(Mutex::new(AppState {
             latest_usage: None,
+            github_token_cache: None,
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
@@ -749,15 +787,46 @@ pub fn run() {
 
                     let claude_result = fetch_usage(&client, &token_info.access_token).await;
 
-                    // GitHub 設定を読み込み (Security: token is read from OS keyring)
-                    let github_config = read_github_config().ok().flatten();
+                    // GitHub 設定を読み込み（キャッシュ優先、なければ keyring を試みる）
+                    let github_config = {
+                        let config = read_app_config().ok();
+                        match config.and_then(|c| c.github) {
+                            Some(gh_storable) => {
+                                let cached_token = {
+                                    let s = app_handle.state::<Arc<Mutex<AppState>>>();
+                                    let s = s.lock().await;
+                                    s.github_token_cache.clone()
+                                };
+                                let token_opt = if let Some(t) = cached_token {
+                                    Some(t)
+                                } else {
+                                    match read_github_token(&gh_storable.username) {
+                                        Ok(t) => Some(t),
+                                        Err(_) => None,
+                                    }
+                                };
+                                token_opt.map(|token| GitHubConfig {
+                                    username: gh_storable.username,
+                                    token,
+                                    monthly_limit: gh_storable.monthly_limit,
+                                })
+                            }
+                            None => None,
+                        }
+                    };
 
                     // GitHub 使用量取得（設定がある場合のみ）
-                    let copilot_result = if let Some(gh) = github_config {
-                        fetch_copilot_usage(&client, &gh.username, &gh.token, gh.monthly_limit)
-                            .await
-                            .ok()
+                    let copilot_result = if let Some(ref gh) = github_config {
+                        match fetch_copilot_usage(&client, &gh.username, &gh.token, gh.monthly_limit).await {
+                            Ok(data) => Some(data),
+                            Err(e) => {
+                                // エラーをフロントエンドに通知
+                                let _ = app_handle.emit("copilot-error", e);
+                                None
+                            }
+                        }
                     } else {
+                        // GitHub 設定が未設定または読み込み失敗
                         None
                     };
 
@@ -886,6 +955,7 @@ pub fn run() {
             quit_app,
             get_github_config,
             save_github_config,
+            validate_github_token,
             is_autostart_enabled,
             enable_autostart,
             disable_autostart,

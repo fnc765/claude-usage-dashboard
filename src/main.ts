@@ -54,6 +54,16 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  await listen<string>("copilot-error", (event) => {
+    console.error("Copilot API error:", event.payload);
+    // Copilot の detail 要素にエラーを表示
+    const copilotDetail = document.getElementById("copilot-detail");
+    if (copilotDetail) {
+      copilotDetail.textContent = `Error: ${event.payload}`;
+      copilotDetail.title = event.payload;
+    }
+  });
+
   await listen<string>("token-status", (event) => {
     const statusEl = document.getElementById("token-status");
     if (!statusEl) return;
