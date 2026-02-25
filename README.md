@@ -1,6 +1,8 @@
 # Claude Code Usage Dashboard
 
-Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視する統合デスクトップウィジェットです。
+[🇯🇵 日本語版 README はこちら](README_jp.md)
+
+An integrated desktop widget for real-time monitoring of Claude Code and GitHub Copilot API usage.
 
 ![Tauri](https://img.shields.io/badge/Tauri-2-blue)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange)
@@ -8,175 +10,175 @@ Claude Code と GitHub Copilot の API 使用量をリアルタイムで監視�
 
 ![Usage Dashboard Screenshot](./image.png)
 
-## 機能
+## Features
 
-### Claude Code 使用量監視
-- **セッション使用量** (5時間枠) と **週間使用量** (7日枠) をプログレスバーで表示
-- 使用量が時間経過に対して超過している場合、オレンジ色で警告表示
-- 60%/80% の閾値で色が変化 (黄色→赤)
-- リセットまでの残り時間をカウントダウン表示
-- リセット時刻の到達を検知して自動リフレッシュ
+### Claude Code Usage Monitoring
+- Displays **session usage** (5-hour window) and **weekly usage** (7-day window) as progress bars
+- Shows an orange warning when usage exceeds what is expected for the time elapsed
+- Color changes at 60%/80% thresholds (yellow → red)
+- Countdown display showing time remaining until reset
+- Automatically refreshes when the reset time is reached
 
-### GitHub Copilot 使用量監視（オプション）
-- **月間使用量**をプログレスバーで表示
-- GitHub Personal Access Token による認証
-- 緑系の色スキームで Claude とは視覚的に区別
-- Context Menu から GitHub PAT を設定可能
+### GitHub Copilot Usage Monitoring (Optional)
+- Displays **monthly usage** as a progress bar
+- Authentication via GitHub Personal Access Token
+- Visually distinguished from Claude with a green color scheme
+- GitHub PAT can be configured from the Context Menu
 
-### カスタマイズ・操作
-- **メーター表示切替**: Claude メーター・Copilot メーター を個別に表示/非表示可能
-  - 設定は localStorage に永続化され、アプリ再起動後も保持される
-- **自動起動**: ログイン時に自動的にアプリを起動
-  - Context Menu から有効/無効を切り替え可能
-- 常に最前面に表示 (トグル可)
-- ウィンドウの透過度・背景エフェクト (Mica / Acrylic) のカスタマイズ
-- ポーリング間隔の変更 (30秒〜5分)
-- システムトレイからの表示/非表示切り替え
-- ドラッグ移動・リサイズ対応
+### Customization & Controls
+- **Meter visibility toggle**: Show/hide the Claude meter and Copilot meter independently
+  - Settings are persisted in localStorage and retained after app restarts
+- **Auto-launch**: Automatically start the app at login
+  - Can be toggled on/off from the Context Menu
+- Always-on-top display (toggleable)
+- Window opacity and background effect customization (Mica / Acrylic)
+- Polling interval adjustment (30 seconds to 5 minutes)
+- Show/hide toggle from the system tray
+- Drag to move and resize support
 
-## 対応プラットフォーム
+## Supported Platforms
 
 - **Windows** (Windows 10/11)
-- **Linux** (Ubuntu, Debian, Fedora など)
-- **macOS** (keyring は `apple-native` 実装済み・動作未検証)
+- **Linux** (Ubuntu, Debian, Fedora, etc.)
+- **macOS** (keyring uses `apple-native` implementation — untested)
 
-### WSL での使用について
+### Using with WSL
 
-- **WSL内のClaude Code**: WSL環境でClaude Codeを使用している場合、WSLの認証ファイルを右クリックメニューから指定してください
-- **認証ファイルのパス形式**: UNC 形式で指定する必要があります
+- **Claude Code inside WSL**: If you are using Claude Code in a WSL environment, specify the WSL credentials file path via the right-click menu.
+- **Credentials file path format**: Must be specified in UNC format:
   ```
-  \\wsl.localhost\<ディストリビューション名>\home\<ユーザー名>\.claude\.credentials.json
+  \\wsl.localhost\<distribution-name>\home\<username>\.claude\.credentials.json
   ```
-  例: `\\wsl.localhost\Ubuntu-24.04\home\user\.claude\.credentials.json`
-- 入力後、コンテキストメニュー内の **Save** ボタンをクリックして保存してください
+  Example: `\\wsl.localhost\Ubuntu-24.04\home\user\.claude\.credentials.json`
+- After entering the path, click the **Save** button in the context menu to save.
 
-## 前提条件
+## Prerequisites
 
-### 必須
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) がインストール済みで、OAuth 認証が完了していること
-  - `~/.claude/.credentials.json` に認証情報が保存されている必要があります
-- [Node.js](https://nodejs.org/) (v18 以上)
+### Required
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed with OAuth authentication completed
+  - Authentication information must be saved at `~/.claude/.credentials.json`
+- [Node.js](https://nodejs.org/) (v18 or higher)
 - [pnpm](https://pnpm.io/)
 - [Rust](https://www.rust-lang.org/tools/install)
 
-### オプション (GitHub Copilot 監視を利用する場合)
-- GitHub Personal Access Token (PAT) が必要です
-  - スコープ: `copilot` 権限が必要
-  - [GitHub Settings](https://github.com/settings/tokens) から生成できます
+### Optional (for GitHub Copilot monitoring)
+- A GitHub Personal Access Token (PAT) is required
+  - Scope: `copilot` permission required
+  - Can be generated from [GitHub Settings](https://github.com/settings/tokens)
 
-## インストール方法
+## Installation
 
-### 方法1: ビルド済みパッケージを使用（推奨）
+### Option 1: Use Pre-built Packages (Recommended)
 
 #### Linux (Ubuntu/Debian)
 
 ```bash
-# 1. GitHubのReleaseページから.debファイルをダウンロード
-#    https://github.com/のリリースページから最新の .deb ファイルを取得してください
+# 1. Download the .deb file from the GitHub Releases page
+#    Get the latest .deb file from the repository's Releases page
 wget <release-url>/usage-dashboard_0.1.0_amd64.deb
 
-# 2. インストール
+# 2. Install
 sudo dpkg -i usage-dashboard_0.1.0_amd64.deb
 
-# 依存関係のエラーが出た場合
+# If dependency errors occur
 sudo apt-get install -f
 
-# 3. 実行
+# 3. Run
 usage-dashboard
 ```
 
-#### Linux (AppImage - 全ディストリビューション対応)
+#### Linux (AppImage — universal, works on all distributions)
 
 ```bash
-# 1. AppImageをダウンロード
-#    GitHubのReleaseページから最新の .AppImage ファイルを取得してください
+# 1. Download the AppImage
+#    Get the latest .AppImage file from the GitHub Releases page
 wget <release-url>/usage-dashboard_0.1.0_amd64.AppImage
 
-# 2. 実行権限を付与
+# 2. Make it executable
 chmod +x usage-dashboard_0.1.0_amd64.AppImage
 
-# 3. 実行
+# 3. Run
 ./usage-dashboard_0.1.0_amd64.AppImage
 ```
 
 #### Windows
 
-GitHub のリリースページから `.msi` インストーラーをダウンロードして実行してください。
+Download and run the `.msi` installer from the GitHub Releases page.
 
-### 方法2: ソースからビルド
+### Option 2: Build from Source
 
 ```bash
-# 依存パッケージのインストール
+# Install dependencies
 pnpm install
 
-# 開発モードで起動
+# Run in development mode
 pnpm tauri dev
 
-# プロダクションビルド
+# Production build
 pnpm tauri build
 ```
 
-## 使い方
+## Usage
 
-### 基本操作
+### Basic Controls
 
-1. アプリを起動すると、小さなウィジェットが画面上に表示されます
-2. ウィジェットをドラッグして好きな位置に配置できます
-3. **右クリック** でコンテキストメニューを開き、以下をカスタマイズできます:
-   - 透過度 (Opacity)
-   - 背景エフェクト (Transparent / Mica / Acrylic) ※Windows専用
-   - 常に最前面表示の ON/OFF
-   - ポーリング間隔
-   - 手動リフレッシュ
-   - **メーター表示切替**: Claude メーター / GitHub Copilot メーター を個別に表示/非表示
-   - **自動起動設定**: ログイン時の自動起動を ON/OFF
-4. システムトレイアイコンからウィジェットの表示/非表示を切り替えられます
+1. When the app launches, a small widget appears on screen.
+2. Drag the widget to position it anywhere you like.
+3. **Right-click** to open the context menu and customize:
+   - Opacity
+   - Background effect (Transparent / Mica / Acrylic) ※Windows only
+   - Always-on-top ON/OFF
+   - Polling interval
+   - Manual refresh
+   - **Meter visibility**: Show/hide the Claude meter and GitHub Copilot meter individually
+   - **Auto-launch settings**: Toggle automatic startup at login ON/OFF
+4. Use the system tray icon to show or hide the widget.
 
-### GitHub Copilot の設定 (オプション)
+### GitHub Copilot Setup (Optional)
 
-GitHub Copilot の使用量を監視したい場合:
+To monitor GitHub Copilot usage:
 
-1. [GitHub Settings](https://github.com/settings/tokens) で Personal Access Token (PAT) を生成
-   - スコープ: `copilot` 権限を付与
-2. ウィジェットを **右クリック** してコンテキストメニューを開く
-3. メニュー内の GitHub Copilot セクションで以下を入力する:
-   - **Username**: GitHub ユーザー名
-   - **Token**: 生成した PAT
-   - **Monthly Limit**: 月間の上限使用量（デフォルト: 300）
-4. **Save** ボタンをクリックして保存
+1. Generate a Personal Access Token (PAT) in [GitHub Settings](https://github.com/settings/tokens)
+   - Scope: grant `copilot` permission
+2. **Right-click** the widget to open the context menu
+3. In the GitHub Copilot section of the menu, fill in:
+   - **Username**: Your GitHub username
+   - **Token**: The PAT you generated
+   - **Monthly Limit**: Your monthly usage limit (default: 300)
+4. Click the **Save** button to save
 
-> トークンは OS キーリング（Windows: Windows Credential Manager、macOS: Keychain、Linux: Secret Service）に安全に保存されます。`config.json` には書き込まれません。
+> The token is stored securely in the OS keyring (Windows: Windows Credential Manager, macOS: Keychain, Linux: Secret Service). It is never written to `config.json`.
 
-## データの保存場所
+## Data Storage Locations
 
-| データ種別 | 保存先 |
-|-----------|-------|
-| アプリ設定 (WSL パス、GitHub ユーザー名など) | `~/.usage-dashboard/config.json` |
-| GitHub PAT (トークン) | OS キーリング (Windows Credential Manager / macOS Keychain / Linux Secret Service) |
-| UI 設定 (透過度、表示切替など) | `localStorage` (アプリ内) |
+| Data Type | Storage Location |
+|-----------|------------------|
+| App settings (WSL path, GitHub username, etc.) | `~/.usage-dashboard/config.json` |
+| GitHub PAT (token) | OS keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service) |
+| UI settings (opacity, visibility toggles, etc.) | `localStorage` (in-app) |
 
-## テスト
+## Testing
 
 ```bash
-# フロントエンド (TypeScript)
-pnpm test                       # 単体テスト
-pnpm test:coverage              # カバレッジ付き
+# Frontend (TypeScript)
+pnpm test                       # Unit tests
+pnpm test:coverage              # With coverage
 
-# バックエンド (Rust)
-pnpm test:coverage:rust:text    # カバレッジ (テキスト)
-pnpm test:coverage:rust         # カバレッジ (HTML出力 → coverage-rust/)
+# Backend (Rust)
+pnpm test:coverage:rust:text    # Coverage (text output)
+pnpm test:coverage:rust         # Coverage (HTML output → coverage-rust/)
 
-# 両方まとめて実行
+# Run both together
 pnpm test:coverage:all
 ```
 
-## 技術スタック
+## Tech Stack
 
-- **フロントエンド**: TypeScript + HTML/CSS (Vanilla)
-- **バックエンド**: Rust (Tauri 2)
-- **ビルドツール**: Vite
-- **パッケージマネージャー**: pnpm
+- **Frontend**: TypeScript + HTML/CSS (Vanilla)
+- **Backend**: Rust (Tauri 2)
+- **Build tool**: Vite
+- **Package manager**: pnpm
 
-## ライセンス
+## License
 
 [MIT](LICENSE)
