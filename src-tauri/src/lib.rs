@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
-#[cfg(target_os = "windows")]
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::time::Duration;
@@ -551,7 +550,6 @@ async fn save_github_config(
 }
 
 #[tauri::command]
-#[cfg(target_os = "windows")]
 async fn is_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     app.autolaunch()
         .is_enabled()
@@ -559,7 +557,6 @@ async fn is_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
-#[cfg(target_os = "windows")]
 async fn enable_autostart(app: tauri::AppHandle) -> Result<(), String> {
     app.autolaunch()
         .enable()
@@ -578,7 +575,6 @@ async fn enable_autostart(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-#[cfg(target_os = "windows")]
 async fn disable_autostart(app: tauri::AppHandle) -> Result<(), String> {
     app.autolaunch()
         .disable()
@@ -594,25 +590,6 @@ async fn disable_autostart(app: tauri::AppHandle) -> Result<(), String> {
     write_app_config(&config)?;
 
     Ok(())
-}
-
-// Windows以外のプラットフォーム向けのフォールバック実装
-#[tauri::command]
-#[cfg(not(target_os = "windows"))]
-async fn is_autostart_enabled(_app: tauri::AppHandle) -> Result<bool, String> {
-    Err("Autostart is only supported on Windows".to_string())
-}
-
-#[tauri::command]
-#[cfg(not(target_os = "windows"))]
-async fn enable_autostart(_app: tauri::AppHandle) -> Result<(), String> {
-    Err("Autostart is only supported on Windows".to_string())
-}
-
-#[tauri::command]
-#[cfg(not(target_os = "windows"))]
-async fn disable_autostart(_app: tauri::AppHandle) -> Result<(), String> {
-    Err("Autostart is only supported on Windows".to_string())
 }
 
 #[tauri::command]
@@ -710,13 +687,10 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init());
 
-    #[cfg(target_os = "windows")]
-    {
-        builder = builder.plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![]),
-        ));
-    }
+    builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec![]),
+    ));
 
     builder
         .manage(Arc::new(Mutex::new(AppState {
