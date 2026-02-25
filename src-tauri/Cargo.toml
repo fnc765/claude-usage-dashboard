@@ -1,6 +1,6 @@
 [package]
 name = "usage-dashboard"
-version = "0.1.0"
+version = "1.1.1"
 description = "Claude Code usage monitoring desktop widget"
 authors = ["choco"]
 edition = "2021"
