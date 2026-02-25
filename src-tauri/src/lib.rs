@@ -653,11 +653,19 @@ async fn validate_github_token(username: String, token: String) -> Result<(), St
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn get_wsl_config() -> Result<Option<WslConfig>, String> {
     Ok(read_app_config()?.wsl)
 }
 
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn get_wsl_config() -> Result<Option<WslConfig>, String> {
+    Ok(None)
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn save_wsl_config(credentials_path: String) -> Result<(), String> {
     let mut config = read_app_config().unwrap_or(AppConfig {
@@ -668,6 +676,12 @@ fn save_wsl_config(credentials_path: String) -> Result<(), String> {
     config.wsl = Some(WslConfig { credentials_path });
     write_app_config(&config)?;
     Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn save_wsl_config(_credentials_path: String) -> Result<(), String> {
+    Err("WSL configuration is only supported on Windows".to_string())
 }
 
 #[tauri::command]

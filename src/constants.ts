@@ -32,7 +32,7 @@ export const POLLING_INTERVALS = {
 // Default settings values
 export const DEFAULT_SETTINGS = {
   OPACITY: 75,
-  BG_EFFECT: "mica" as const,
+  BG_EFFECT: "transparent" as const,
   ALWAYS_ON_TOP: true,
   POLLING_INTERVAL: 60,
   SHOW_CLAUDE_METERS: true,

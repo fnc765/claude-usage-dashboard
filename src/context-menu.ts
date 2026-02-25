@@ -174,6 +174,15 @@ export function initContextMenu(): void {
   applyAllSettings(settings);
   syncMenuUI();
 
+  // WSL セクションは Windows 専用のため、他 OS では非表示にする
+  const isWindows = navigator.userAgent.toLowerCase().includes("windows");
+  const wslSection = document.getElementById("wsl-section");
+  const wslDivider = document.getElementById("wsl-divider");
+  if (!isWindows) {
+    if (wslSection) wslSection.style.display = "none";
+    if (wslDivider) wslDivider.style.display = "none";
+  }
+
   // Load autostart status from system on startup
   loadAutostartStatus();
 
