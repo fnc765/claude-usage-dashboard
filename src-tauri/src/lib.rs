@@ -120,13 +120,13 @@ struct CopilotUsageData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CombinedUsageData {
-    claude: UsageData,
+    claude: Option<UsageData>,
     #[serde(default)]
     copilot: Option<CopilotUsageData>,
 }
 
 struct AppState {
-    latest_usage: Option<UsageData>,
+    latest_usage: Option<CombinedUsageData>,
     http_client: reqwest::Client,
     /// キーリング読み込み失敗時のフォールバック用メモリキャッシュ
     github_token_cache: Option<String>,
@@ -438,7 +438,7 @@ fn parse_copilot_usage(body: &str, monthly_limit: f64) -> Result<CopilotUsageDat
 }
 
 #[tauri::command]
-async fn get_usage(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<UsageData, String> {
+async fn get_usage(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<CombinedUsageData, String> {
     let state = state.lock().await;
     state
         .latest_usage
@@ -753,47 +753,53 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 async fn do_fetch(app_handle: &tauri::AppHandle) {
-                    let token_info = match read_token_info() {
-                        Ok(t) => t,
-                        Err(e) => {
-                            eprintln!("Token error: {}", e);
-                            let _ = app_handle.emit("token-status", "error");
-                            return;
-                        }
-                    };
-
-                    if is_token_expired(token_info.expires_at) {
-                        eprintln!("Access token expired. Run Claude Code to refresh.");
-                        let _ = app_handle.emit("token-status", "expired");
-                        return;
-                    }
-
                     let client = {
                         let state = app_handle.state::<Arc<Mutex<AppState>>>();
                         let s = state.lock().await;
                         s.http_client.clone()
                     };
 
-                    let claude_result = fetch_usage(&client, &token_info.access_token).await;
+                    // --- Claude取得（失敗してもCopilotは続行） ---
+                    let claude_result: Option<UsageData> = match read_token_info() {
+                        Ok(token_info) => {
+                            if is_token_expired(token_info.expires_at) {
+                                eprintln!("Access token expired. Run Claude Code to refresh.");
+                                let _ = app_handle.emit("token-status", "expired");
+                                None
+                            } else {
+                                match fetch_usage(&client, &token_info.access_token).await {
+                                    Ok(usage) => {
+                                        let _ = app_handle.emit("token-status", "ok");
+                                        Some(usage)
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Failed to fetch Claude usage: {}", e);
+                                        let _ = app_handle.emit("token-status", "fetch_error");
+                                        None
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Token read failed: {}", e);
+                            let _ = app_handle.emit("token-status", "error");
+                            None
+                        }
+                    };
 
-                    // GitHub 設定を読み込み（キャッシュ優先、なければ keyring を試みる）
-                    let github_config = {
+                    // --- Copilot取得（常に実行） ---
+                    let copilot_result: Option<CopilotUsageData> = {
                         let config = read_app_config().ok();
-                        match config.and_then(|c| c.github) {
+                        let github_config = match config.and_then(|c| c.github) {
                             Some(gh_storable) => {
                                 let cached_token = {
                                     let s = app_handle.state::<Arc<Mutex<AppState>>>();
                                     let s = s.lock().await;
                                     s.github_token_cache.clone()
                                 };
-                                let token_opt = if let Some(t) = cached_token {
-                                    Some(t)
-                                } else {
-                                    match read_github_token(&gh_storable.username) {
-                                        Ok(t) => Some(t),
-                                        Err(_) => None,
-                                    }
-                                };
+                                let token_opt = cached_token.or_else(|| {
+                                    read_github_token(&gh_storable.username).ok()
+                                });
                                 token_opt.map(|token| GitHubConfig {
                                     username: gh_storable.username,
                                     token,
@@ -801,48 +807,40 @@ pub fn run() {
                                 })
                             }
                             None => None,
+                        };
+
+                        if let Some(ref gh) = github_config {
+                            match fetch_copilot_usage(&client, &gh.username, &gh.token, gh.monthly_limit).await {
+                                Ok(data) => Some(data),
+                                Err(e) => {
+                                    eprintln!("Failed to fetch Copilot usage: {}", e);
+                                    let _ = app_handle.emit("copilot-error", "Failed to fetch Copilot usage");
+                                    None
+                                }
+                            }
+                        } else {
+                            None
                         }
                     };
 
-                    // GitHub 使用量取得（設定がある場合のみ）
-                    let copilot_result = if let Some(ref gh) = github_config {
-                        match fetch_copilot_usage(&client, &gh.username, &gh.token, gh.monthly_limit).await {
-                            Ok(data) => Some(data),
-                            Err(e) => {
-                                // エラーをフロントエンドに通知
-                                let _ = app_handle.emit("copilot-error", e);
-                                None
-                            }
-                        }
+                    // --- 結果送信 ---
+                    let combined = CombinedUsageData {
+                        claude: claude_result,
+                        copilot: copilot_result,
+                    };
+                    if combined.claude.is_some() || combined.copilot.is_some() {
+                        let _ = app_handle.emit("usage-update", &combined);
+
+                        // AppState更新
+                        let state = app_handle.state::<Arc<Mutex<AppState>>>();
+                        let mut s = state.lock().await;
+                        s.latest_usage = Some(combined);
                     } else {
-                        // GitHub 設定が未設定または読み込み失敗
-                        None
-                    };
-
-                    // 結果を結合して送信
-                    match claude_result {
-                        Ok(claude_data) => {
-                            let combined = CombinedUsageData {
-                                claude: claude_data.clone(),
-                                copilot: copilot_result,
-                            };
-
-                            let _ = app_handle.emit("usage-update", &combined);
-                            let _ = app_handle.emit("token-status", "ok");
-
-                            let state = app_handle.state::<Arc<Mutex<AppState>>>();
-                            let mut s = state.lock().await;
-                            s.latest_usage = Some(claude_data);
-                        }
-                        Err(e) => {
-                            eprintln!("Claude API error: {}", e);
-                            let _ = app_handle.emit("token-status", "fetch_error");
-
-                            // Claude 失敗時でも Copilot データは送信
-                            if let Some(copilot_data) = copilot_result {
-                                let _ = app_handle.emit("copilot-only-update", &copilot_data);
-                            }
-                        }
+                        // 両方失敗時: 旧データをクリアし、ステータスを通知
+                        let state = app_handle.state::<Arc<Mutex<AppState>>>();
+                        let mut s = state.lock().await;
+                        s.latest_usage = None;
+                        let _ = app_handle.emit("token-status", "no-service");
                     }
                 }
 
@@ -1598,7 +1596,7 @@ mod tests {
     #[test]
     fn test_combined_usage_data_without_copilot() {
         let combined = CombinedUsageData {
-            claude: UsageData {
+            claude: Some(UsageData {
                 five_hour: UsageMeter { utilization: 10.0, resets_at: None },
                 seven_day: UsageMeter { utilization: 20.0, resets_at: None },
                 seven_day_oauth_apps: None,
@@ -1607,13 +1605,14 @@ mod tests {
                 seven_day_cowork: None,
                 iguana_necktie: None,
                 extra_usage: None,
-            },
+            }),
             copilot: None,
         };
         let json = serde_json::to_string(&combined).unwrap();
         let deserialized: CombinedUsageData = serde_json::from_str(&json).unwrap();
         assert!(deserialized.copilot.is_none());
-        assert_eq!(deserialized.claude.five_hour.utilization, 10.0);
+        assert!(deserialized.claude.is_some());
+        assert_eq!(deserialized.claude.unwrap().five_hour.utilization, 10.0);
     }
 
     #[test]
@@ -1634,10 +1633,32 @@ mod tests {
             }
         }"#;
         let combined: CombinedUsageData = serde_json::from_str(json).unwrap();
+        assert!(combined.claude.is_some());
         assert!(combined.copilot.is_some());
         let copilot = combined.copilot.unwrap();
         assert_eq!(copilot.total_requests, 100.0);
         assert_eq!(copilot.items.len(), 1);
+    }
+
+    #[test]
+    fn test_combined_usage_data_copilot_only() {
+        // Claude未設定、Copilotのみ
+        let json = r#"{
+            "claude": null,
+            "copilot": {
+                "total_requests": 50.0,
+                "monthly_limit": 300.0,
+                "utilization": 16.67,
+                "resets_at": "2026-03-01T00:00:00Z",
+                "items": [
+                    { "model": "gpt-4o", "gross_quantity": 50.0 }
+                ]
+            }
+        }"#;
+        let combined: CombinedUsageData = serde_json::from_str(json).unwrap();
+        assert!(combined.claude.is_none());
+        assert!(combined.copilot.is_some());
+        assert_eq!(combined.copilot.unwrap().total_requests, 50.0);
     }
 
     #[test]

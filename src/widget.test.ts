@@ -77,7 +77,7 @@ describe('widget.ts', () => {
 
     it('should handle expired session', () => {
       const pastDate = new Date(Date.now() - 10000).toISOString();
-      mockData.claude.five_hour.resets_at = pastDate;
+      mockData.claude!.five_hour.resets_at = pastDate;
 
       updateWidget(mockData);
 
@@ -87,7 +87,7 @@ describe('widget.ts', () => {
 
     it('should handle expired weekly', () => {
       const pastDate = new Date(Date.now() - 10000).toISOString();
-      mockData.claude.seven_day.resets_at = pastDate;
+      mockData.claude!.seven_day.resets_at = pastDate;
 
       updateWidget(mockData);
 
@@ -112,7 +112,7 @@ describe('widget.ts', () => {
     });
 
     it('should apply critical class when utilization >= 80%', () => {
-      mockData.claude.five_hour.utilization = 85;
+      mockData.claude!.five_hour.utilization = 85;
 
       updateWidget(mockData);
 
@@ -121,7 +121,7 @@ describe('widget.ts', () => {
     });
 
     it('should apply warning class when utilization >= 60%', () => {
-      mockData.claude.five_hour.utilization = 65;
+      mockData.claude!.five_hour.utilization = 65;
 
       updateWidget(mockData);
 
@@ -131,10 +131,10 @@ describe('widget.ts', () => {
 
     it('should show excess bar when usage exceeds time elapsed', () => {
       // Set utilization much higher than time elapsed would be
-      mockData.claude.five_hour.utilization = 90;
+      mockData.claude!.five_hour.utilization = 90;
       // Reset time very close to current time (high time elapsed)
       const soonDate = new Date(Date.now() + 60000).toISOString(); // 1 minute from now
-      mockData.claude.five_hour.resets_at = soonDate;
+      mockData.claude!.five_hour.resets_at = soonDate;
 
       updateWidget(mockData);
 
@@ -142,6 +142,51 @@ describe('widget.ts', () => {
       // Excess bar should have some opacity when overpacing
       // Note: in happy-dom, style.opacity might not compute, so we check the style attribute
       expect(excessBar?.style.opacity).toBeDefined();
+    });
+
+    it('should show "Claude not configured" when claude is null', () => {
+      const copilotOnlyData: CombinedUsageData = {
+        claude: null,
+        copilot: {
+          total_requests: 100,
+          monthly_limit: 500,
+          utilization: 20,
+          resets_at: new Date(Date.now() + 3600000).toISOString(),
+          items: [],
+        },
+      };
+
+      updateWidget(copilotOnlyData);
+
+      const sessionDetail = document.getElementById('session-detail');
+      const weeklyDetail = document.getElementById('weekly-detail');
+      expect(sessionDetail?.textContent).toBe('Claude not configured');
+      expect(weeklyDetail?.textContent).toBe('Claude not configured');
+    });
+
+    it('should reset copilot bar when copilot is null', () => {
+      // First set copilot data
+      const withCopilot: CombinedUsageData = {
+        claude: null,
+        copilot: {
+          total_requests: 100,
+          monthly_limit: 500,
+          utilization: 20,
+          resets_at: new Date(Date.now() + 3600000).toISOString(),
+          items: [],
+        },
+      };
+      updateWidget(withCopilot);
+
+      // Then update with copilot null
+      const withoutCopilot: CombinedUsageData = {
+        claude: null,
+        copilot: null,
+      };
+      updateWidget(withoutCopilot);
+
+      const copilotDetail = document.getElementById('copilot-detail');
+      expect(copilotDetail?.textContent).toBe('Copilot not configured');
     });
   });
 });

@@ -41,8 +41,8 @@ export interface CopilotUsageData {
 }
 
 export interface CombinedUsageData {
-  claude: UsageData;
-  copilot?: CopilotUsageData | null;
+  claude: UsageData | null;
+  copilot: CopilotUsageData | null;
 }
 
 interface BarElements {
@@ -223,27 +223,42 @@ export function updateWidget(data: CombinedUsageData) {
     detail: getElement("weekly-detail"),
   };
 
-  const sessionTimePercent = calcTimeElapsedPercent(data.claude.five_hour.resets_at, TIME_WINDOWS.SESSION);
-  const weeklyTimePercent = calcTimeElapsedPercent(data.claude.seven_day.resets_at, TIME_WINDOWS.WEEKLY);
+  if (data.claude) {
+    const sessionTimePercent = calcTimeElapsedPercent(data.claude.five_hour.resets_at, TIME_WINDOWS.SESSION);
+    const weeklyTimePercent = calcTimeElapsedPercent(data.claude.seven_day.resets_at, TIME_WINDOWS.WEEKLY);
 
-  updateBar(
-    sessionElements,
-    data.claude.five_hour.utilization,
-    sessionTimePercent,
-    data.claude.five_hour.resets_at,
-    "No active session",
-  );
+    updateBar(
+      sessionElements,
+      data.claude.five_hour.utilization,
+      sessionTimePercent,
+      data.claude.five_hour.resets_at,
+      "No active session",
+    );
 
-  updateBar(
-    weeklyElements,
-    data.claude.seven_day.utilization,
-    weeklyTimePercent,
-    data.claude.seven_day.resets_at,
-    "Awaiting reset",
-  );
+    updateBar(
+      weeklyElements,
+      data.claude.seven_day.utilization,
+      weeklyTimePercent,
+      data.claude.seven_day.resets_at,
+      "Awaiting reset",
+    );
+  } else {
+    // Claude未設定時: バーを非表示にする
+    updateBar(sessionElements, 0, 0, null, "Claude not configured");
+    updateBar(weeklyElements, 0, 0, null, "Claude not configured");
+  }
 
   // Copilot 使用量更新
   if (data.copilot) {
     updateCopilotBar(data.copilot);
+  } else {
+    // Copilotデータがnullの場合、バーをリセット
+    const copilotElements: BarElements = {
+      usageBar: getElement("copilot-usage-bar"),
+      timeBar: getElement("copilot-time-bar"),
+      excessBar: getElement("copilot-excess-bar"),
+      detail: getElement("copilot-detail"),
+    };
+    updateBar(copilotElements, 0, 0, null, "Copilot not configured");
   }
 }

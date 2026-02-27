@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { updateWidget, isExpired, type CombinedUsageData, type CopilotUsageData, type UsageData } from "./widget";
+import { updateWidget, isExpired, type CombinedUsageData } from "./widget";
 import { initContextMenu } from "./context-menu";
 import { POLLING_INTERVALS } from "./constants";
 
@@ -23,15 +23,12 @@ async function initDrag() {
 
 async function fetchInitialData() {
   try {
-    const data = await invoke<CombinedUsageData | UsageData>("get_usage");
-    // get_usage may return only Claude data, wrap it in CombinedUsageData format if needed
-    if (data && "five_hour" in data) {
-      latestData = { claude: data as UsageData, copilot: null };
-    } else {
-      latestData = data as CombinedUsageData;
+    const data = await invoke<CombinedUsageData>("get_usage");
+    if (data) {
+      latestData = data;
+      refreshTriggered = false;
+      updateWidget(latestData);
     }
-    refreshTriggered = false;
-    if (latestData) updateWidget(latestData);
   } catch {
     // Will be updated via events once API connects
   }
@@ -45,13 +42,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     latestData = event.payload;
     refreshTriggered = false;
     updateWidget(event.payload);
-  });
-
-  await listen<CopilotUsageData>("copilot-only-update", (event) => {
-    if (latestData) {
-      latestData.copilot = event.payload;
-      updateWidget(latestData);
-    }
   });
 
   await listen<string>("copilot-error", (event) => {
@@ -89,6 +79,11 @@ window.addEventListener("DOMContentLoaded", async () => {
         statusEl.className = "token-status";
         statusEl.title = "";
         break;
+      case "no-service":
+        statusEl.textContent = "⚠ No service";
+        statusEl.className = "token-status error";
+        statusEl.title = "Claude と Copilot の両方からデータを取得できませんでした。\n設定を確認してください。";
+        break;
     }
   });
 
@@ -99,8 +94,12 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     updateWidget(latestData);
 
-    const sessionExpired = isExpired(latestData.claude.five_hour.resets_at);
-    const weeklyExpired = isExpired(latestData.claude.seven_day.resets_at);
+    const sessionExpired = latestData.claude
+      ? isExpired(latestData.claude.five_hour.resets_at)
+      : false;
+    const weeklyExpired = latestData.claude
+      ? isExpired(latestData.claude.seven_day.resets_at)
+      : false;
     const copilotExpired = latestData.copilot
       ? isExpired(latestData.copilot.resets_at)
       : false;

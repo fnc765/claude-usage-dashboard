@@ -251,10 +251,6 @@ describe('main.ts', () => {
       expect(mockListen).toBeDefined();
     });
 
-    it('should setup copilot-only-update event listener', () => {
-      expect(mockListen).toBeDefined();
-    });
-
     it('should setup token-status event listener', () => {
       expect(mockListen).toBeDefined();
     });
@@ -297,8 +293,8 @@ describe('main.ts', () => {
       };
 
       expect(data.claude).toBeDefined();
-      expect(data.claude.five_hour).toBeDefined();
-      expect(data.claude.seven_day).toBeDefined();
+      expect(data.claude!.five_hour).toBeDefined();
+      expect(data.claude!.seven_day).toBeDefined();
       expect(data.copilot).toBeNull();
     });
 
@@ -341,25 +337,6 @@ describe('main.ts', () => {
       expect(updateWidget).toHaveBeenCalledWith(mockCombinedData);
     });
 
-    it('copilot-only-update callback merges copilot data and calls updateWidget', () => {
-      // Set latestData via usage-update first
-      listenCallbacks['usage-update']({ payload: { ...mockCombinedData } });
-      vi.mocked(updateWidget).mockClear();
-
-      const copilotPayload: CopilotUsageData = {
-        total_requests: 100,
-        monthly_limit: 500,
-        utilization: 20,
-        resets_at: new Date(Date.now() + 3600000).toISOString(),
-        items: [{ model: 'gpt-4', gross_quantity: 100 }],
-      };
-
-      listenCallbacks['copilot-only-update']({ payload: copilotPayload });
-      expect(updateWidget).toHaveBeenCalledTimes(1);
-      const arg = vi.mocked(updateWidget).mock.calls[0][0];
-      expect(arg.copilot).toEqual(copilotPayload);
-    });
-
     describe('token-status callback', () => {
       it('handles "expired" status', () => {
         listenCallbacks['token-status']({ payload: 'expired' });
@@ -389,6 +366,13 @@ describe('main.ts', () => {
         expect(el.className).toBe('token-status');
       });
 
+      it('handles "no-service" status', () => {
+        listenCallbacks['token-status']({ payload: 'no-service' });
+        const el = document.getElementById('token-status')!;
+        expect(el.textContent).toBe('\u26a0 No service');
+        expect(el.className).toBe('token-status error');
+      });
+
       it('does nothing when #token-status element is missing', () => {
         document.getElementById('token-status')!.remove();
         // Should not throw
@@ -414,39 +398,23 @@ describe('main.ts', () => {
     });
   });
 
-  describe('copilot-only-update edge case', () => {
-    it('does nothing when latestData is null', () => {
-      // Reset latestData to null via usage-update
-      listenCallbacks['usage-update']({ payload: null });
-      vi.mocked(updateWidget).mockClear();
-
-      const copilotPayload: CopilotUsageData = {
-        total_requests: 50,
-        monthly_limit: 300,
-        utilization: 16.7,
-        resets_at: new Date(Date.now() + 86400000).toISOString(),
-        items: [{ model: 'gpt-4', gross_quantity: 50 }],
-      };
-
-      listenCallbacks['copilot-only-update']({ payload: copilotPayload });
-      expect(updateWidget).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('fetchInitialData — UsageData response', () => {
-    it('wraps UsageData (with five_hour) in CombinedUsageData format', async () => {
+  describe('fetchInitialData — CombinedUsageData response', () => {
+    it('passes CombinedUsageData directly to updateWidget', async () => {
       vi.useFakeTimers();
-      const usageData = {
-        five_hour: {
-          utilization: 60,
-          resets_at: new Date(Date.now() + 3600000).toISOString(),
+      const combinedData: CombinedUsageData = {
+        claude: {
+          five_hour: {
+            utilization: 60,
+            resets_at: new Date(Date.now() + 3600000).toISOString(),
+          },
+          seven_day: {
+            utilization: 40,
+            resets_at: new Date(Date.now() + 86400000).toISOString(),
+          },
         },
-        seven_day: {
-          utilization: 40,
-          resets_at: new Date(Date.now() + 86400000).toISOString(),
-        },
+        copilot: null,
       };
-      mockInvoke.mockResolvedValue(usageData);
+      mockInvoke.mockResolvedValue(combinedData);
       vi.mocked(updateWidget).mockClear();
 
       window.dispatchEvent(new Event('DOMContentLoaded'));
@@ -454,8 +422,7 @@ describe('main.ts', () => {
 
       expect(updateWidget).toHaveBeenCalled();
       const calledWith = vi.mocked(updateWidget).mock.calls[0][0];
-      expect(calledWith.claude).toEqual(usageData);
-      expect(calledWith.copilot).toBeNull();
+      expect(calledWith).toEqual(combinedData);
       vi.useRealTimers();
     });
   });
