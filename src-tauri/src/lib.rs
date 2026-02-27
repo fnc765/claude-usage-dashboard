@@ -687,6 +687,15 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init());
 
+    builder = builder.plugin(
+        tauri_plugin_window_state::Builder::new()
+            .with_state_flags(
+                tauri_plugin_window_state::StateFlags::SIZE
+                    | tauri_plugin_window_state::StateFlags::POSITION,
+            )
+            .build(),
+    );
+
     builder = builder.plugin(tauri_plugin_autostart::init(
         tauri_plugin_autostart::MacosLauncher::LaunchAgent,
         Some(vec![]),
@@ -714,6 +723,13 @@ pub fn run() {
                     let _ = apply_acrylic(&window, Some((18, 18, 18, 200)));
                 }
             }
+
+            // ウィンドウ状態の復元（vibrancy 適用後）
+            use tauri_plugin_window_state::WindowExt;
+            let _ = window.restore_state(
+                tauri_plugin_window_state::StateFlags::SIZE
+                    | tauri_plugin_window_state::StateFlags::POSITION,
+            );
 
             // System tray
             let toggle = MenuItemBuilder::with_id("toggle", "Show/Hide").build(app)?;
