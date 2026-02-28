@@ -175,13 +175,8 @@ export function initContextMenu(): void {
   syncMenuUI();
 
   // WSL セクションは Windows 専用のため、他 OS では非表示にする
-  const isWindows = navigator.userAgent.toLowerCase().includes("windows");
-  const wslSection = document.getElementById("wsl-section");
-  const wslDivider = document.getElementById("wsl-divider");
-  if (!isWindows) {
-    if (wslSection) wslSection.style.display = "none";
-    if (wslDivider) wslDivider.style.display = "none";
-  }
+  // バックエンドからプラットフォーム情報を取得し、失敗時は userAgent にフォールバック
+  applyWslSectionVisibility();
 
   // Load autostart status from system on startup
   loadAutostartStatus();
@@ -399,11 +394,28 @@ export function initContextMenu(): void {
       return;
     }
 
+    // パスが .credentials.json で終わっていない場合、自動補完
+    let normalizedPath = credentialsPath;
+    if (!normalizedPath.endsWith('.credentials.json')) {
+      if (normalizedPath.endsWith('/') || normalizedPath.endsWith('\\')) {
+        normalizedPath += '.credentials.json';
+      } else {
+        normalizedPath += '/.credentials.json';
+      }
+      alert(`Path was auto-completed to: ${normalizedPath}`);
+    }
+
     try {
-      await invoke("save_wsl_config", {
-        credentialsPath,
+      const result = await invoke<{ warnings: string[] }>("save_wsl_config", {
+        credentialsPath: normalizedPath,
       });
-      alert("WSL settings saved successfully!");
+      if (result.warnings.length > 0) {
+        alert(
+          "WSL path saved with warnings:\n" + result.warnings.join("\n"),
+        );
+      } else {
+        alert("WSL settings saved successfully!");
+      }
       await invoke("force_refresh");
     } catch (e) {
       alert(`Failed to save WSL settings: ${e}`);
@@ -464,5 +476,29 @@ async function loadAutostartStatus() {
     }
   } catch (e) {
     console.error("Failed to load autostart status:", e);
+  }
+}
+
+interface PlatformInfo {
+  os: string;
+  is_wsl_supported: boolean;
+}
+
+/** Determine WSL section visibility using backend platform info, with userAgent fallback. */
+async function applyWslSectionVisibility(): Promise<void> {
+  let isWslSupported: boolean;
+  try {
+    const platformInfo = await invoke<PlatformInfo>("get_platform_info");
+    isWslSupported = platformInfo.is_wsl_supported;
+  } catch {
+    // Fallback: use navigator.userAgent when backend is unavailable
+    isWslSupported = navigator.userAgent.toLowerCase().includes("windows");
+  }
+
+  if (!isWslSupported) {
+    const wslSection = document.getElementById("wsl-section");
+    const wslDivider = document.getElementById("wsl-divider");
+    if (wslSection) wslSection.style.display = "none";
+    if (wslDivider) wslDivider.style.display = "none";
   }
 }

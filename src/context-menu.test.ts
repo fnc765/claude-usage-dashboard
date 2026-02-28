@@ -185,6 +185,9 @@ describe('context-menu.ts', () => {
       const longPath = '\\\\wsl.localhost\\' + 'a'.repeat(500);
       expect(longPath.length).toBeGreaterThan(500);
     });
+
+    // NOTE: Auto-complete tests are covered via SUT (UI click → invoke args) in
+    // the 'initContextMenu() behavior' describe block. No manual re-implementation here.
   });
 
   describe('GitHub config validation', () => {
@@ -231,6 +234,8 @@ describe('context-menu.ts', () => {
         <div data-meter-type="claude-weekly"></div>
         <div data-meter-type="copilot"></div>
         <div id="empty-placeholder"></div>
+        <div id="wsl-section"></div>
+        <div id="wsl-divider"></div>
         <div id="context-menu" style="display:none">
           <input id="opacity-slider" type="range" value="75" />
           <span id="opacity-value">75%</span>
@@ -560,10 +565,106 @@ describe('context-menu.ts', () => {
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
+    // --- WSL config save: auto-complete .claude path ---
+    it('should auto-complete path ending with .claude', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      mockInvoke.mockResolvedValue({ warnings: [] });
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const inputPath = '\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\.claude';
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = inputPath;
+
+      saveWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      const expectedPath = inputPath + '/.credentials.json';
+      expect(mockAlert).toHaveBeenCalledWith(`Path was auto-completed to: ${expectedPath}`);
+      expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
+        credentialsPath: expectedPath,
+      });
+    });
+
+    // --- WSL config save: auto-complete directory path with trailing slash ---
+    it('should auto-complete path ending with slash', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      mockInvoke.mockResolvedValue({ warnings: [] });
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const inputPath = '\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\.claude/';
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = inputPath;
+
+      saveWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      const expectedPath = inputPath + '.credentials.json';
+      expect(mockAlert).toHaveBeenCalledWith(`Path was auto-completed to: ${expectedPath}`);
+      expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
+        credentialsPath: expectedPath,
+      });
+    });
+
+    // --- WSL config save: auto-complete arbitrary path ---
+    it('should auto-complete path not ending with .credentials.json', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      mockInvoke.mockResolvedValue({ warnings: [] });
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const inputPath = '\\\\wsl.localhost\\Ubuntu-24.04\\home\\user';
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = inputPath;
+
+      saveWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      const expectedPath = inputPath + '/.credentials.json';
+      expect(mockAlert).toHaveBeenCalledWith(`Path was auto-completed to: ${expectedPath}`);
+      expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
+        credentialsPath: expectedPath,
+      });
+    });
+
+    // --- WSL config save: auto-complete path ending with backslash ---
+    it('should auto-complete path ending with backslash', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      mockInvoke.mockResolvedValue({ warnings: [] });
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const inputPath = '\\\\wsl.localhost\\Ubuntu\\home\\user\\.claude\\';
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = inputPath;
+
+      saveWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      const expectedPath = inputPath + '.credentials.json';
+      expect(mockAlert).toHaveBeenCalledWith(`Path was auto-completed to: ${expectedPath}`);
+      expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
+        credentialsPath: expectedPath,
+      });
+    });
+
+    // --- WSL config save: no auto-complete when already correct ---
+    it('should not auto-complete path already ending with .credentials.json', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      mockInvoke.mockResolvedValue({ warnings: [] });
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const validPath = '\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\.claude\\.credentials.json';
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = validPath;
+
+      saveWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      // auto-complete alert should NOT be shown
+      expect(mockAlert).not.toHaveBeenCalledWith(expect.stringContaining('auto-completed'));
+      expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
+        credentialsPath: validPath,
+      });
+    });
+
     // --- WSL config save: valid path ---
     it('should save WSL config with valid path', async () => {
       const mockAlert = vi.fn();
       window.alert = mockAlert;
+      mockInvoke.mockResolvedValue({ warnings: [] });
       const saveWslBtn = document.getElementById('save-wsl-config')!;
       const validPath = '\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\.claude\\.credentials.json';
       (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = validPath;
@@ -576,6 +677,51 @@ describe('context-menu.ts', () => {
       });
       expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
       expect(mockAlert).toHaveBeenCalledWith('WSL settings saved successfully!');
+    });
+
+    // --- WSL config save: valid path with warnings ---
+    it('should show warnings when save_wsl_config returns warnings', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      mockInvoke.mockResolvedValue({
+        warnings: ['File does not exist. WSL might not be running or path may be incorrect.'],
+      });
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const validPath = '\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\.claude\\.credentials.json';
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = validPath;
+
+      saveWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
+        credentialsPath: validPath,
+      });
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockAlert).toHaveBeenCalledWith(
+        'WSL path saved with warnings:\nFile does not exist. WSL might not be running or path may be incorrect.',
+      );
+    });
+
+    // --- WSL config save: multiple warnings joined by newline ---
+    it('should display multiple warnings joined by newline', async () => {
+      const mockAlert = vi.fn();
+      window.alert = mockAlert;
+      mockInvoke.mockResolvedValue({
+        warnings: ['Warning 1', 'Warning 2'],
+      });
+      const saveWslBtn = document.getElementById('save-wsl-config')!;
+      const validPath = '\\\\wsl.localhost\\Ubuntu-24.04\\home\\user\\.claude\\.credentials.json';
+      (document.getElementById('wsl-credentials-path') as HTMLInputElement).value = validPath;
+
+      saveWslBtn.click();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
+        credentialsPath: validPath,
+      });
+      expect(mockAlert).toHaveBeenCalledWith(
+        'WSL path saved with warnings:\nWarning 1\nWarning 2',
+      );
     });
 
     // --- WSL config clear ---
@@ -603,6 +749,8 @@ describe('context-menu.ts', () => {
         <div data-meter-type="claude-weekly"></div>
         <div data-meter-type="copilot"></div>
         <div id="empty-placeholder"></div>
+        <div id="wsl-section"></div>
+        <div id="wsl-divider"></div>
         <div id="context-menu" style="display:none">
           <input id="opacity-slider" type="range" value="75" />
           <span id="opacity-value">75%</span>
@@ -737,6 +885,135 @@ describe('context-menu.ts', () => {
       expect(slider.value).toBe('75');
       const opacityValue = document.getElementById('opacity-value')!;
       expect(opacityValue.textContent).toBe('75%');
+    });
+  });
+
+  describe('applyWslSectionVisibility', () => {
+    function setupWslDOM(): void {
+      document.body.innerHTML = `
+        <div class="widget"></div>
+        <div data-meter-type="claude-session"></div>
+        <div data-meter-type="claude-weekly"></div>
+        <div data-meter-type="copilot"></div>
+        <div id="empty-placeholder"></div>
+        <div id="wsl-section"></div>
+        <div id="wsl-divider"></div>
+        <div id="context-menu" style="display:none">
+          <input id="opacity-slider" type="range" value="75" />
+          <span id="opacity-value">75%</span>
+          <span id="aot-check"></span>
+          <div id="toggle-aot"></div>
+          <div id="force-refresh"></div>
+          <div id="quit-app"></div>
+          <div id="toggle-claude-meters"></div>
+          <span id="claude-meters-check"></span>
+          <div id="toggle-copilot-meter"></div>
+          <span id="copilot-meter-check"></span>
+          <div id="toggle-autostart"></div>
+          <span id="autostart-check"></span>
+          <button id="save-github-config"></button>
+          <input id="github-username" />
+          <input id="github-token" />
+          <input id="monthly-limit" />
+          <button id="save-wsl-config"></button>
+          <input id="wsl-credentials-path" />
+          <button id="clear-wsl-config"></button>
+          <div data-effect="transparent"></div>
+          <div data-effect="mica" class="active"></div>
+          <div data-effect="acrylic"></div>
+          <div data-interval="30"></div>
+          <div data-interval="60" class="active"></div>
+        </div>
+      `;
+    }
+
+    beforeEach(() => {
+      localStorage.clear();
+      mockInvoke.mockReset();
+      setupWslDOM();
+    });
+
+    it('should show WSL section on Windows (get_platform_info returns is_wsl_supported: true)', async () => {
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_platform_info') {
+          return Promise.resolve({ os: 'windows', is_wsl_supported: true });
+        }
+        return Promise.resolve();
+      });
+
+      initContextMenu();
+      await new Promise(r => setTimeout(r, 0));
+
+      const wslSection = document.getElementById('wsl-section')!;
+      const wslDivider = document.getElementById('wsl-divider')!;
+      // WSL supported → section should remain visible (display not set to "none")
+      expect(wslSection.style.display).not.toBe('none');
+      expect(wslDivider.style.display).not.toBe('none');
+    });
+
+    it('should hide WSL section on non-Windows (get_platform_info returns is_wsl_supported: false)', async () => {
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_platform_info') {
+          return Promise.resolve({ os: 'linux', is_wsl_supported: false });
+        }
+        return Promise.resolve();
+      });
+
+      initContextMenu();
+      await new Promise(r => setTimeout(r, 0));
+
+      const wslSection = document.getElementById('wsl-section')!;
+      const wslDivider = document.getElementById('wsl-divider')!;
+      expect(wslSection.style.display).toBe('none');
+      expect(wslDivider.style.display).toBe('none');
+    });
+
+    it('should fallback to userAgent when get_platform_info fails (Windows userAgent)', async () => {
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_platform_info') {
+          return Promise.reject(new Error('Backend unavailable'));
+        }
+        return Promise.resolve();
+      });
+
+      // Mock navigator.userAgent to simulate Windows
+      Object.defineProperty(navigator, 'userAgent', {
+        value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        configurable: true,
+      });
+
+      initContextMenu();
+      await new Promise(r => setTimeout(r, 0));
+
+      const wslSection = document.getElementById('wsl-section')!;
+      const wslDivider = document.getElementById('wsl-divider')!;
+      // userAgent contains "windows" → WSL section stays visible
+      expect(wslSection.style.display).not.toBe('none');
+      expect(wslDivider.style.display).not.toBe('none');
+    });
+
+    it('should fallback to userAgent when get_platform_info fails (non-Windows userAgent)', async () => {
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_platform_info') {
+          return Promise.reject(new Error('Backend unavailable'));
+        }
+        return Promise.resolve();
+      });
+
+      // Mock navigator.userAgent to simulate Linux
+      Object.defineProperty(navigator, 'userAgent', {
+        value: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+        configurable: true,
+      });
+
+      initContextMenu();
+      await new Promise(r => setTimeout(r, 0));
+
+      const wslSection = document.getElementById('wsl-section')!;
+      const wslDivider = document.getElementById('wsl-divider')!;
+      // userAgent does NOT contain "windows" → WSL section hidden
+      expect(wslSection.style.display).toBe('none');
+      expect(wslDivider.style.display).toBe('none');
     });
   });
 });

@@ -1,10 +1,11 @@
 use keyring::Entry;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
@@ -17,6 +18,73 @@ use tokio_util::sync::CancellationToken;
 const TOKEN_EXPIRATION_BUFFER_MS: u64 = 30_000; // 30 seconds
 const MAX_WSL_PATH_LENGTH: usize = 500;
 const MAX_RESPONSE_PREVIEW_CHARS: usize = 500;
+const WSL_FILE_READ_TIMEOUT_SECS: u64 = 5;
+const WSL_STARTUP_RETRY_DELAY_SECS: u64 = 10;
+const WSL_COOLDOWN_SECS: u64 = 30;
+
+// Invariant: WSL_COOLDOWN_SECS >= WSL_FILE_READ_TIMEOUT_SECS
+// This ensures at most one leaked thread from read_file_with_timeout at any time.
+const _: () = assert!(WSL_COOLDOWN_SECS >= WSL_FILE_READ_TIMEOUT_SECS);
+
+static WSL_LAST_TIMEOUT: OnceLock<std::sync::Mutex<Option<Instant>>> = OnceLock::new();
+
+/// Returns a reference to the global WSL cooldown state.
+fn wsl_cooldown_state() -> &'static std::sync::Mutex<Option<Instant>> {
+    WSL_LAST_TIMEOUT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Returns `true` if WSL reads should be skipped due to a recent timeout.
+fn should_skip_wsl() -> bool {
+    if let Ok(guard) = wsl_cooldown_state().lock() {
+        if let Some(last) = *guard {
+            return last.elapsed().as_secs() < WSL_COOLDOWN_SECS;
+        }
+    }
+    false
+}
+
+/// Records the current time as the last WSL timeout.
+fn record_wsl_timeout() {
+    if let Ok(mut guard) = wsl_cooldown_state().lock() {
+        *guard = Some(Instant::now());
+    }
+}
+
+/// Clears the WSL timeout state (e.g., after a successful read).
+fn clear_wsl_timeout() {
+    if let Ok(mut guard) = wsl_cooldown_state().lock() {
+        *guard = None;
+    }
+}
+
+/// Error types for WSL file read operations.
+#[derive(Debug)]
+enum WslReadError {
+    /// The file read timed out (WSL may not be running).
+    Timeout,
+    /// An I/O error occurred while reading the file.
+    IoError(String),
+    /// The file or path was not found.
+    NotFound(String),
+}
+
+impl std::fmt::Display for WslReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WslReadError::Timeout => write!(f, "WSL file read timed out"),
+            WslReadError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            WslReadError::NotFound(msg) => write!(f, "Not found: {}", msg),
+        }
+    }
+}
+
+/// Determines whether WSL credentials should be retried on startup.
+///
+/// Returns `true` if WSL is configured but Claude usage data was not obtained
+/// (indicating WSL may not have been ready at first attempt).
+fn should_retry_wsl_on_startup(has_wsl_config: bool, claude_usage_is_none: bool) -> bool {
+    has_wsl_config && claude_usage_is_none
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,8 +160,21 @@ struct WslConfig {
     credentials_path: String,
 }
 
+/// Result of saving WSL config, including non-blocking warnings about file accessibility.
+#[derive(Debug, Clone, Serialize)]
+struct SaveWslResult {
+    warnings: Vec<String>,
+}
+
+/// Platform information provided to the frontend for OS-specific UI decisions.
+#[derive(Debug, Clone, Serialize)]
+struct PlatformInfo {
+    os: String,
+    is_wsl_supported: bool,
+}
+
 // Security: AppConfig stores only non-sensitive data on disk
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct AppConfig {
     #[serde(default)]
     github: Option<GitHubConfigStorable>,
@@ -153,12 +234,15 @@ fn config_path() -> Result<PathBuf, String> {
 
 fn read_config_from_path(path: &std::path::Path) -> Result<AppConfig, String> {
     if !path.exists() {
-        return Ok(AppConfig { github: None, autostart_enabled: false, wsl: None });
+        return Ok(AppConfig {
+            github: None,
+            autostart_enabled: false,
+            wsl: None,
+        });
     }
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {}", e))
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read config: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))
 }
 
 fn read_app_config() -> Result<AppConfig, String> {
@@ -169,8 +253,7 @@ fn read_app_config() -> Result<AppConfig, String> {
 fn write_config_to_path(path: &std::path::Path, config: &AppConfig) -> Result<(), String> {
     let content = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    std::fs::write(path, content)
-        .map_err(|e| format!("Failed to write config: {}", e))
+    std::fs::write(path, content).map_err(|e| format!("Failed to write config: {}", e))
 }
 
 fn write_app_config(config: &AppConfig) -> Result<(), String> {
@@ -219,9 +302,11 @@ fn calculate_next_month_reset() -> String {
     let datetime = chrono::DateTime::<Utc>::from_timestamp(now as i64, 0).unwrap();
 
     let next_month = if datetime.month() == 12 {
-        Utc.with_ymd_and_hms(datetime.year() + 1, 1, 1, 0, 0, 0).unwrap()
+        Utc.with_ymd_and_hms(datetime.year() + 1, 1, 1, 0, 0, 0)
+            .unwrap()
     } else {
-        Utc.with_ymd_and_hms(datetime.year(), datetime.month() + 1, 1, 0, 0, 0).unwrap()
+        Utc.with_ymd_and_hms(datetime.year(), datetime.month() + 1, 1, 0, 0, 0)
+            .unwrap()
     };
 
     next_month.to_rfc3339()
@@ -234,34 +319,86 @@ struct TokenInfo {
 }
 
 fn read_token_info() -> Result<TokenInfo, String> {
-    // まずWindows版を試す
-    match read_token_info_windows() {
-        Ok(token) => return Ok(token),
-        Err(windows_err) => {
-            // Windows版が失敗した場合、WSL版を試す
-            if let Ok(config) = read_app_config() {
-                if let Some(wsl_config) = config.wsl {
-                    match read_token_info_wsl(&wsl_config.credentials_path) {
-                        Ok(token) => return Ok(token),
-                        Err(wsl_err) => {
-                            // セキュリティ: 詳細なエラーはログに出力し、ユーザーには一般的なメッセージを表示
-                            eprintln!("Windows credential error: {}", windows_err);
-                            eprintln!("WSL credential error: {}", wsl_err);
-                            return Err("Failed to read credentials from both Windows and WSL. Please check your configuration.".to_string());
-                        }
+    let config = read_app_config().unwrap_or_else(|e| {
+        eprintln!(
+            "[WARN] Failed to read app config, WSL fallback disabled: {}",
+            e
+        );
+        AppConfig::default()
+    });
+    let wsl_path = config.wsl.as_ref().map(|w| w.credentials_path.as_str());
+
+    // S2: Windows credentials を先に読み取り（WSLタイムアウト時のレイテンシ改善）
+    let windows_result = read_token_info_windows();
+
+    // WSLはクールダウン中ならスキップ
+    let wsl_result: Option<Result<TokenInfo, WslReadError>> = if should_skip_wsl() {
+        eprintln!("[INFO] Skipping WSL read (cooldown active after previous timeout)");
+        wsl_path.map(|_| Err(WslReadError::Timeout))
+    } else {
+        let result = wsl_path.map(read_token_info_wsl);
+        if let Some(ref r) = result {
+            match r {
+                Ok(_) => clear_wsl_timeout(),
+                Err(WslReadError::Timeout) => record_wsl_timeout(),
+                Err(_) => {}
+            }
+        }
+        result
+    };
+
+    // WSLパスが設定されている場合、WSL優先で選択
+    match (wsl_result, windows_result) {
+        // 両方成功: expiredでない方を選択、両方有効ならWSL優先
+        (Some(Ok(wsl_token)), Ok(win_token)) => {
+            let wsl_expired = is_token_expired(wsl_token.expires_at);
+            let win_expired = is_token_expired(win_token.expires_at);
+            match (wsl_expired, win_expired) {
+                (false, _) => {
+                    eprintln!("Using WSL credentials (WSL token valid)");
+                    Ok(wsl_token)
+                }
+                (true, false) => {
+                    eprintln!("Using Windows credentials (Windows token valid, WSL expired)");
+                    Ok(win_token)
+                }
+                (true, true) => {
+                    // 両方expired時は、expires_atが新しい方を返す（再リフレッシュされた側を優先）
+                    if wsl_token.expires_at >= win_token.expires_at {
+                        eprintln!("Both tokens expired, using WSL with newer expires_at");
+                        Ok(wsl_token)
+                    } else {
+                        eprintln!("Both tokens expired, using Windows with newer expires_at");
+                        Ok(win_token)
                     }
                 }
             }
-            // WSL設定がない場合はWindows版のエラーを返す
-            Err(windows_err)
         }
+        // WSLのみ成功
+        (Some(Ok(wsl_token)), Err(_)) => {
+            eprintln!("Using WSL credentials (Windows credentials unavailable)");
+            Ok(wsl_token)
+        }
+        // Windowsのみ成功（WSL失敗 or WSL設定なし）
+        (Some(Err(_)), Ok(win_token)) | (None, Ok(win_token)) => {
+            eprintln!("Using Windows credentials (WSL credentials unavailable)");
+            Ok(win_token)
+        }
+        // 両方失敗
+        (Some(Err(wsl_err)), Err(win_err)) => {
+            eprintln!("Windows credential error: {}", win_err);
+            eprintln!("WSL credential error: {}", wsl_err);
+            Err("Failed to read credentials from both Windows and WSL".to_string())
+        }
+        // WSL設定なし、Windows失敗
+        (None, Err(win_err)) => Err(win_err),
     }
 }
 
 fn read_token_info_windows() -> Result<TokenInfo, String> {
     let path = credentials_path()?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read credentials: {}", e))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read credentials: {}", e))?;
     let creds: Credentials = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse credentials: {}", e))?;
     Ok(TokenInfo {
@@ -270,46 +407,80 @@ fn read_token_info_windows() -> Result<TokenInfo, String> {
     })
 }
 
-#[cfg(target_os = "windows")]
-fn read_token_info_wsl(wsl_path: &str) -> Result<TokenInfo, String> {
-    use std::path::Path;
-
-    // セキュリティ検証: WSL UNCパスであることを確認
+/// Validates a WSL UNC path for security and correctness.
+/// Returns the normalized path ending with `.credentials.json`.
+fn validate_wsl_path(wsl_path: &str) -> Result<String, String> {
+    // UNCプレフィックス検証
     if !wsl_path.starts_with("\\\\wsl.localhost\\") && !wsl_path.starts_with("//wsl.localhost/") {
         return Err("WSL path must start with \\\\wsl.localhost\\".to_string());
     }
-
-    // セキュリティ検証: パストラバーサル攻撃を防ぐ
+    // パストラバーサル拒否
     if wsl_path.contains("..") {
         return Err("Path traversal detected in WSL path".to_string());
     }
-
-    // セキュリティ検証: パスの最大長チェック（DoS対策）
+    // 長さ制限
     if wsl_path.len() > MAX_WSL_PATH_LENGTH {
-        return Err(format!("WSL path is too long (max {} characters)", MAX_WSL_PATH_LENGTH));
+        return Err(format!(
+            "WSL path is too long (max {} characters)",
+            MAX_WSL_PATH_LENGTH
+        ));
     }
-
-    // パスが .credentials.json で終わっていない場合、自動的に追加
-    let path = Path::new(wsl_path);
-    let full_path = if path.extension().is_none() || path.file_name() == Some(std::ffi::OsStr::new(".claude")) {
-        // ディレクトリパスの場合、.credentials.json を追加
+    // .credentials.json 末尾チェック（ディレクトリパスの場合は自動補完）
+    let path = std::path::Path::new(wsl_path);
+    let full_path = if path.extension().is_none()
+        || path.file_name() == Some(std::ffi::OsStr::new(".claude"))
+    {
         path.join(".credentials.json")
     } else {
         path.to_path_buf()
     };
-
-    // セキュリティ検証: 最終的なパスが .credentials.json で終わることを確認
     let path_str = full_path.to_string_lossy();
     if !path_str.ends_with(".credentials.json") {
         return Err("WSL credentials path must end with .credentials.json".to_string());
     }
+    Ok(path_str.into_owned())
+}
 
-    // UNCパスを読み取る
-    let content = std::fs::read_to_string(&full_path)
-        .map_err(|e| format!("Failed to read WSL credentials: {}", e))?;
+/// WSL UNCパス読み取り用のタイムアウト付きファイル読み取り。
+/// WSL未起動時にブロッキングI/Oがハングするのを防ぐ。
+///
+/// Spawns a background thread to perform the file I/O. If the read does not
+/// complete within `timeout_secs`, returns `WslReadError::Timeout`.
+///
+/// # Thread Leak Note
+/// On timeout, the spawned thread may continue running until the OS-level I/O
+/// completes or the process exits. This is acceptable because:
+/// - The cooldown mechanism (`WSL_COOLDOWN_SECS`) prevents repeated thread creation
+/// - `WSL_COOLDOWN_SECS >= WSL_FILE_READ_TIMEOUT_SECS` ensures at most one leaked
+///   thread at a time
+#[cfg(target_os = "windows")]
+fn read_file_with_timeout(path: &str, timeout_secs: u64) -> Result<String, WslReadError> {
+    let path = path.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::fs::read_to_string(&path);
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(timeout_secs))
+        .map_err(|_| WslReadError::Timeout)?
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                WslReadError::NotFound(format!("File not found: {}", e))
+            } else {
+                WslReadError::IoError(format!("Failed to read file: {}", e))
+            }
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn read_token_info_wsl(wsl_path: &str) -> Result<TokenInfo, WslReadError> {
+    let validated_path = validate_wsl_path(wsl_path).map_err(WslReadError::NotFound)?;
+
+    // UNCパスをタイムアウト付きで読み取る（WSL未起動時のハング防止）
+    let content = read_file_with_timeout(&validated_path, WSL_FILE_READ_TIMEOUT_SECS)?;
 
     let creds: Credentials = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse WSL credentials: {}", e))?;
+        .map_err(|e| WslReadError::IoError(format!("Failed to parse WSL credentials: {}", e)))?;
 
     Ok(TokenInfo {
         access_token: creds.claude_ai_oauth.access_token,
@@ -318,16 +489,34 @@ fn read_token_info_wsl(wsl_path: &str) -> Result<TokenInfo, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn read_token_info_wsl(_wsl_path: &str) -> Result<TokenInfo, String> {
-    Err("WSL credentials are only supported on Windows".to_string())
+fn read_token_info_wsl(_wsl_path: &str) -> Result<TokenInfo, WslReadError> {
+    Err(WslReadError::NotFound(
+        "WSL credentials are only supported on Windows".to_string(),
+    ))
+}
+
+/// Normalize `expires_at` to milliseconds.
+///
+/// Claude CLI versions may provide `expires_at` in either seconds or milliseconds.
+/// Threshold: values below 10^10 are treated as seconds (covers up to year 2286),
+/// values at or above 10^10 are treated as milliseconds (min ~2001).
+fn normalize_expires_at(expires_at: u64) -> u64 {
+    if expires_at < 10_000_000_000 {
+        // 10桁以下 → 秒単位と判定、ミリ秒に変換
+        expires_at * 1000
+    } else {
+        // 13桁 → ミリ秒単位としてそのまま使用
+        expires_at
+    }
 }
 
 fn is_token_expired(expires_at: u64) -> bool {
+    let expires_at_ms = normalize_expires_at(expires_at);
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    now_ms + TOKEN_EXPIRATION_BUFFER_MS >= expires_at
+    now_ms + TOKEN_EXPIRATION_BUFFER_MS >= expires_at_ms
 }
 
 async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageData, String> {
@@ -356,9 +545,8 @@ async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageData,
         .map_err(|e| format!("Failed to read response body: {}", e))?;
 
     let truncated: String = body.chars().take(MAX_RESPONSE_PREVIEW_CHARS).collect();
-    serde_json::from_str::<UsageData>(&body).map_err(|e| {
-        format!("Failed to parse response: {}. Body: {}", e, truncated)
-    })
+    serde_json::from_str::<UsageData>(&body)
+        .map_err(|e| format!("Failed to parse response: {}. Body: {}", e, truncated))
 }
 
 async fn fetch_copilot_usage(
@@ -392,7 +580,9 @@ async fn fetch_copilot_usage(
         return Err(format!("GitHub API status {}: {}", status, error_msg));
     }
 
-    let body = resp.text().await
+    let body = resp
+        .text()
+        .await
         .map_err(|e| format!("Failed to read GitHub response: {}", e))?;
 
     parse_copilot_usage(&body, monthly_limit)
@@ -438,7 +628,9 @@ fn parse_copilot_usage(body: &str, monthly_limit: f64) -> Result<CopilotUsageDat
 }
 
 #[tauri::command]
-async fn get_usage(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<CombinedUsageData, String> {
+async fn get_usage(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<CombinedUsageData, String> {
     let state = state.lock().await;
     state
         .latest_usage
@@ -457,8 +649,9 @@ fn set_background_effect(window: tauri::WebviewWindow, effect: String) -> Result
 
         match effect.as_str() {
             "transparent" => Ok(()),
-            "mica" => apply_mica(&window, Some(true))
-                .map_err(|e| format!("Failed to apply mica: {}", e)),
+            "mica" => {
+                apply_mica(&window, Some(true)).map_err(|e| format!("Failed to apply mica: {}", e))
+            }
             "acrylic" => apply_acrylic(&window, Some((18, 18, 18, 200)))
                 .map_err(|e| format!("Failed to apply acrylic: {}", e)),
             _ => Err(format!("Unknown effect: {}", effect)),
@@ -489,7 +682,7 @@ fn set_polling_interval(
     control: tauri::State<'_, Arc<PollingControl>>,
     seconds: u64,
 ) -> Result<(), String> {
-    if seconds < 10 || seconds > 600 {
+    if !(10..=600).contains(&seconds) {
         return Err("Polling interval must be between 10 and 600 seconds".to_string());
     }
     control
@@ -645,20 +838,43 @@ fn get_wsl_config() -> Result<Option<WslConfig>, String> {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn save_wsl_config(credentials_path: String) -> Result<(), String> {
+fn save_wsl_config(credentials_path: String) -> Result<SaveWslResult, String> {
+    // セキュリティ検証: パスのバリデーション
+    let validated_path = validate_wsl_path(&credentials_path)?;
+
+    // ファイル読み取りテスト（警告レベル — 保存はブロックしない）
+    let mut warnings: Vec<String> = Vec::new();
+
+    match read_file_with_timeout(&validated_path, WSL_FILE_READ_TIMEOUT_SECS) {
+        Ok(content) => {
+            if let Err(e) = serde_json::from_str::<Credentials>(&content) {
+                warnings.push(format!("File found but JSON parse failed: {}", e));
+            }
+        }
+        Err(WslReadError::Timeout) => {
+            warnings.push("WSL might not be running (read timed out).".to_string());
+        }
+        Err(WslReadError::IoError(_) | WslReadError::NotFound(_)) => {
+            warnings.push("File does not exist or cannot be read.".to_string());
+        }
+    }
+
+    // 保存はバリデーション済みパスで実行する
     let mut config = read_app_config().unwrap_or(AppConfig {
         github: None,
         autostart_enabled: false,
         wsl: None,
     });
-    config.wsl = Some(WslConfig { credentials_path });
+    config.wsl = Some(WslConfig {
+        credentials_path: validated_path,
+    });
     write_app_config(&config)?;
-    Ok(())
+    Ok(SaveWslResult { warnings })
 }
 
 #[cfg(not(target_os = "windows"))]
 #[tauri::command]
-fn save_wsl_config(_credentials_path: String) -> Result<(), String> {
+fn save_wsl_config(_credentials_path: String) -> Result<SaveWslResult, String> {
     Err("WSL configuration is only supported on Windows".to_string())
 }
 
@@ -674,6 +890,15 @@ fn clear_wsl_config() -> Result<(), String> {
     Ok(())
 }
 
+/// Returns platform information for OS-specific UI decisions.
+#[tauri::command]
+fn get_platform_info() -> PlatformInfo {
+    PlatformInfo {
+        os: std::env::consts::OS.to_string(),
+        is_wsl_supported: cfg!(target_os = "windows"),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (interval_tx, interval_rx) = watch::channel(60u64);
@@ -684,8 +909,7 @@ pub fn run() {
         shutdown_token: shutdown_token.clone(),
     });
 
-    let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init());
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
 
     builder = builder.plugin(
         tauri_plugin_window_state::Builder::new()
@@ -813,9 +1037,8 @@ pub fn run() {
                                     let s = s.lock().await;
                                     s.github_token_cache.clone()
                                 };
-                                let token_opt = cached_token.or_else(|| {
-                                    read_github_token(&gh_storable.username).ok()
-                                });
+                                let token_opt = cached_token
+                                    .or_else(|| read_github_token(&gh_storable.username).ok());
                                 token_opt.map(|token| GitHubConfig {
                                     username: gh_storable.username,
                                     token,
@@ -826,11 +1049,19 @@ pub fn run() {
                         };
 
                         if let Some(ref gh) = github_config {
-                            match fetch_copilot_usage(&client, &gh.username, &gh.token, gh.monthly_limit).await {
+                            match fetch_copilot_usage(
+                                &client,
+                                &gh.username,
+                                &gh.token,
+                                gh.monthly_limit,
+                            )
+                            .await
+                            {
                                 Ok(data) => Some(data),
                                 Err(e) => {
                                     eprintln!("Failed to fetch Copilot usage: {}", e);
-                                    let _ = app_handle.emit("copilot-error", "Failed to fetch Copilot usage");
+                                    let _ = app_handle
+                                        .emit("copilot-error", "Failed to fetch Copilot usage");
                                     None
                                 }
                             }
@@ -863,6 +1094,27 @@ pub fn run() {
                 // Immediate first fetch
                 do_fetch(&app_handle).await;
 
+                // WSL設定がある場合の初回リトライ（WSL未起動時に10秒後に1回だけ再試行）
+                {
+                    let has_wsl_config = read_app_config().ok().and_then(|c| c.wsl).is_some();
+                    let claude_usage_is_none = {
+                        let state = app_handle.state::<Arc<Mutex<AppState>>>();
+                        let s = state.lock().await;
+                        s.latest_usage
+                            .as_ref()
+                            .and_then(|u| u.claude.as_ref())
+                            .is_none()
+                    };
+                    if should_retry_wsl_on_startup(has_wsl_config, claude_usage_is_none) {
+                        eprintln!(
+                            "WSL token not available on startup, retrying in {} seconds...",
+                            WSL_STARTUP_RETRY_DELAY_SECS
+                        );
+                        tokio::time::sleep(Duration::from_secs(WSL_STARTUP_RETRY_DELAY_SECS)).await;
+                        do_fetch(&app_handle).await;
+                    }
+                }
+
                 // Dynamic polling loop with shutdown support
                 loop {
                     let secs = *interval_rx.borrow();
@@ -888,63 +1140,145 @@ pub fn run() {
             // Start credentials file watcher with proper cleanup
             let watcher_shutdown = watcher_pc.shutdown_token.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                if let Ok(cred_path) = credentials_path() {
-                    if let Some(parent) = cred_path.parent() {
-                        let (tx, rx) = std_mpsc::channel();
-                        let mut watcher: RecommendedWatcher =
-                            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-                                if let Ok(event) = res {
-                                    if event.kind.is_modify() || event.kind.is_create() {
-                                        let _ = tx.send(());
+                let (tx, rx) = std_mpsc::channel();
+
+                // Windows credentials watcher (independent initialization)
+                let _windows_watcher: Option<RecommendedWatcher> = {
+                    match credentials_path() {
+                        Ok(cred_path) => {
+                            if let Some(parent) = cred_path.parent() {
+                                let tx_win = tx.clone();
+                                match notify::recommended_watcher(
+                                    move |res: Result<notify::Event, notify::Error>| {
+                                        if let Ok(event) = res {
+                                            if event.kind.is_modify() || event.kind.is_create() {
+                                                let _ = tx_win.send(());
+                                            }
+                                        }
+                                    },
+                                ) {
+                                    Ok(mut w) => {
+                                        match w.watch(parent, RecursiveMode::NonRecursive) {
+                                            Ok(_) => {
+                                                eprintln!(
+                                                    "Watching credentials file: {}",
+                                                    cred_path.display()
+                                                );
+                                                Some(w)
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "[WARN] Failed to watch credentials dir: {}",
+                                                    e
+                                                );
+                                                None
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[WARN] Failed to create file watcher: {}", e);
+                                        None
                                     }
                                 }
-                            }) {
-                                Ok(w) => w,
+                            } else {
+                                None
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[WARN] Could not determine credentials path: {}", e);
+                            None
+                        }
+                    }
+                };
+
+                // WSL credentials PollWatcher (independent initialization)
+                let _wsl_watcher: Option<PollWatcher> = {
+                    let config = read_app_config().unwrap_or_else(|_| AppConfig::default());
+                    if let Some(wsl_path) = config.wsl.as_ref().map(|w| w.credentials_path.as_str())
+                    {
+                        let wsl_file = std::path::Path::new(wsl_path);
+                        if let Some(wsl_parent) = wsl_file.parent() {
+                            let tx_wsl = tx.clone();
+                            let poll_config = notify::Config::default()
+                                .with_poll_interval(std::time::Duration::from_secs(10));
+                            match PollWatcher::new(
+                                move |res: Result<notify::Event, notify::Error>| {
+                                    if let Ok(event) = res {
+                                        if event.kind.is_modify() || event.kind.is_create() {
+                                            let _ = tx_wsl.send(());
+                                        }
+                                    }
+                                },
+                                poll_config,
+                            ) {
+                                Ok(mut pw) => {
+                                    match pw.watch(wsl_parent, RecursiveMode::NonRecursive) {
+                                        Ok(_) => {
+                                            eprintln!(
+                                                "Watching WSL credentials path: {}",
+                                                wsl_path
+                                            );
+                                            Some(pw)
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[WARN] Failed to watch WSL path: {}", e);
+                                            None
+                                        }
+                                    }
+                                }
                                 Err(e) => {
-                                    eprintln!("Failed to create file watcher: {}", e);
-                                    return;
-                                }
-                            };
-
-                        if let Err(e) = watcher.watch(parent, RecursiveMode::NonRecursive) {
-                            eprintln!("Failed to watch credentials dir: {}", e);
-                            return;
-                        }
-
-                        eprintln!("Watching credentials file: {}", cred_path.display());
-
-                        loop {
-                            // Check for shutdown signal with timeout
-                            if watcher_shutdown.is_cancelled() {
-                                eprintln!("File watcher shutting down...");
-                                break;
-                            }
-
-                            // Wait for file change with timeout to allow periodic shutdown checks
-                            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                                Ok(_) => {
-                                    // Drain any additional events within 1 second
-                                    while rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok() {}
-                                    eprintln!("Credentials file changed, triggering refresh...");
-                                    watcher_pc.refresh_notify.notify_one();
-                                }
-                                Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                                    // Timeout is normal, continue to check shutdown signal
-                                    continue;
-                                }
-                                Err(std_mpsc::RecvTimeoutError::Disconnected) => {
-                                    // Channel closed, exit gracefully
-                                    eprintln!("File watcher channel disconnected");
-                                    break;
+                                    eprintln!("[WARN] Failed to create WSL PollWatcher: {}", e);
+                                    None
                                 }
                             }
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    }
+                };
 
-                        // Explicit cleanup: drop the watcher to release resources
-                        drop(watcher);
-                        eprintln!("File watcher resources released");
+                // Drop the original sender; clones are moved into watcher callbacks
+                drop(tx);
+
+                // If no watchers were created, exit early
+                if _windows_watcher.is_none() && _wsl_watcher.is_none() {
+                    eprintln!("[WARN] No file watchers created, skipping credentials monitoring");
+                    return;
+                }
+
+                loop {
+                    // Check for shutdown signal with timeout
+                    if watcher_shutdown.is_cancelled() {
+                        eprintln!("File watcher shutting down...");
+                        break;
+                    }
+
+                    // Wait for file change with timeout to allow periodic shutdown checks
+                    match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                        Ok(_) => {
+                            // Drain any additional events within 1 second
+                            while rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok() {}
+                            eprintln!("Credentials file changed, triggering refresh...");
+                            watcher_pc.refresh_notify.notify_one();
+                        }
+                        Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                            // Timeout is normal, continue to check shutdown signal
+                            continue;
+                        }
+                        Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                            // Channel closed, exit gracefully
+                            eprintln!("File watcher channel disconnected");
+                            break;
+                        }
                     }
                 }
+
+                // Explicit cleanup: drop watchers to release resources
+                drop(_windows_watcher);
+                drop(_wsl_watcher);
+                eprintln!("File watcher resources released");
             });
 
             Ok(())
@@ -965,6 +1299,7 @@ pub fn run() {
             get_wsl_config,
             save_wsl_config,
             clear_wsl_config,
+            get_platform_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1057,7 +1392,10 @@ mod tests {
 
         let deserialized: UsageMeter = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.utilization, 45.5);
-        assert_eq!(deserialized.resets_at, Some("2026-03-01T00:00:00Z".to_string()));
+        assert_eq!(
+            deserialized.resets_at,
+            Some("2026-03-01T00:00:00Z".to_string())
+        );
     }
 
     #[test]
@@ -1072,7 +1410,7 @@ mod tests {
         let json = serde_json::to_string(&extra).unwrap();
         let deserialized: ExtraUsage = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.is_enabled, true);
+        assert!(deserialized.is_enabled);
         assert_eq!(deserialized.monthly_limit, 1000.0);
         assert_eq!(deserialized.used_credits, 250.0);
         assert_eq!(deserialized.utilization, 25.0);
@@ -1106,7 +1444,8 @@ mod tests {
     #[test]
     fn test_wsl_config_serialization() {
         let config = WslConfig {
-            credentials_path: r"\\wsl.localhost\Ubuntu-24.04\home\user\.claude\.credentials.json".to_string(),
+            credentials_path: r"\\wsl.localhost\Ubuntu-24.04\home\user\.claude\.credentials.json"
+                .to_string(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1121,13 +1460,13 @@ mod tests {
         let config: AppConfig = serde_json::from_str(json).unwrap();
 
         assert!(config.github.is_none());
-        assert_eq!(config.autostart_enabled, false);
+        assert!(!config.autostart_enabled);
         assert!(config.wsl.is_none());
     }
 
     #[test]
     fn test_copilot_usage_calculation() {
-        let items = vec![
+        let items = [
             CopilotUsageItem {
                 model: "gpt-4".to_string(),
                 gross_quantity: 100.0,
@@ -1169,7 +1508,7 @@ mod tests {
         // 存在しないファイルの場合、デフォルト値を返す
         let config = read_config_from_path(&path).unwrap();
         assert!(config.github.is_none());
-        assert_eq!(config.autostart_enabled, false);
+        assert!(!config.autostart_enabled);
         assert!(config.wsl.is_none());
     }
 
@@ -1243,8 +1582,12 @@ mod tests {
         let gh = loaded.github.unwrap();
         assert_eq!(gh.username, "roundtrip-user");
         assert_eq!(gh.monthly_limit, 500.0);
-        assert_eq!(loaded.autostart_enabled, true);
-        assert!(loaded.wsl.unwrap().credentials_path.contains("wsl.localhost"));
+        assert!(loaded.autostart_enabled);
+        assert!(loaded
+            .wsl
+            .unwrap()
+            .credentials_path
+            .contains("wsl.localhost"));
     }
 
     #[test]
@@ -1263,7 +1606,7 @@ mod tests {
         let gh = config.github.unwrap();
         assert_eq!(gh.username, "alice");
         assert_eq!(gh.monthly_limit, 750.0);
-        assert_eq!(config.autostart_enabled, false);
+        assert!(!config.autostart_enabled);
         assert!(config.wsl.unwrap().credentials_path.contains("Debian"));
     }
 
@@ -1282,7 +1625,7 @@ mod tests {
 
         let loaded = read_config_from_path(&path).unwrap();
         assert!(loaded.github.is_none());
-        assert_eq!(loaded.autostart_enabled, false);
+        assert!(!loaded.autostart_enabled);
         assert!(loaded.wsl.is_none());
     }
 
@@ -1294,7 +1637,17 @@ mod tests {
         // WSL UNC パスでないパスは拒否される
         let result = read_token_info_wsl(r"C:\Users\user\.claude\.credentials.json");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("WSL path must start with"));
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, WslReadError::NotFound(_)),
+            "Expected NotFound, got: {:?}",
+            err
+        );
+        assert!(
+            err.to_string().contains("WSL path must start with"),
+            "Unexpected message: {}",
+            err
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -1303,7 +1656,12 @@ mod tests {
         // パストラバーサル攻撃（`..` を含むパス）は拒否される
         let result = read_token_info_wsl(r"\\wsl.localhost\Ubuntu\..\..\..\etc\passwd");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Path traversal detected"));
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Path traversal detected"),
+            "Unexpected message: {}",
+            err
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -1314,7 +1672,12 @@ mod tests {
         let long_path = format!(r"\\wsl.localhost\Ubuntu\home\{}", long_segment);
         let result = read_token_info_wsl(&long_path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("too long"));
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("too long"),
+            "Unexpected message: {}",
+            err
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -1323,7 +1686,12 @@ mod tests {
         // .credentials.json で終わらないファイルパスは拒否される
         let result = read_token_info_wsl(r"\\wsl.localhost\Ubuntu\home\user\config.toml");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains(".credentials.json"));
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains(".credentials.json"),
+            "Unexpected message: {}",
+            err
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -1336,8 +1704,11 @@ mod tests {
         // パス検証エラー（prefix/traversal/suffix）ではなく、ファイル読み取りエラーになるべき
         let err = result.unwrap_err();
         assert!(
-            err.contains("Failed to read WSL credentials"),
-            "Expected file read error, got: {}",
+            matches!(
+                err,
+                WslReadError::IoError(_) | WslReadError::NotFound(_) | WslReadError::Timeout
+            ),
+            "Expected file read error, got: {:?}",
             err
         );
     }
@@ -1352,8 +1723,11 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.contains("Failed to read WSL credentials") || err.contains("Failed to parse WSL credentials"),
-            "Expected file I/O error, got: {}",
+            matches!(
+                err,
+                WslReadError::IoError(_) | WslReadError::NotFound(_) | WslReadError::Timeout
+            ),
+            "Expected file I/O error, got: {:?}",
             err
         );
     }
@@ -1362,13 +1736,17 @@ mod tests {
     #[test]
     fn test_wsl_path_forward_slash_prefix_accepted() {
         // //wsl.localhost/ スタイルのパスも受け入れられる
-        let result = read_token_info_wsl("//wsl.localhost/Ubuntu/home/user/.claude/.credentials.json");
+        let result =
+            read_token_info_wsl("//wsl.localhost/Ubuntu/home/user/.claude/.credentials.json");
         assert!(result.is_err());
         let err = result.unwrap_err();
         // パス検証エラーではなく、ファイル読み取りエラーになるべき
         assert!(
-            err.contains("Failed to read WSL credentials") || err.contains("Failed to parse"),
-            "Expected file I/O error, got: {}",
+            matches!(
+                err,
+                WslReadError::IoError(_) | WslReadError::NotFound(_) | WslReadError::Timeout
+            ),
+            "Expected file I/O error, got: {:?}",
             err
         );
     }
@@ -1379,7 +1757,9 @@ mod tests {
     fn test_parse_copilot_usage_invalid_json() {
         let result = parse_copilot_usage("not valid json {{{", 300.0);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Failed to parse GitHub response"));
+        assert!(result
+            .unwrap_err()
+            .contains("Failed to parse GitHub response"));
     }
 
     #[test]
@@ -1469,13 +1849,17 @@ mod tests {
         // github のみ指定し、他はデフォルト
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{ "github": { "username": "bob", "monthly_limit": 100.0 } }"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{ "github": { "username": "bob", "monthly_limit": 100.0 } }"#,
+        )
+        .unwrap();
 
         let config = read_config_from_path(&path).unwrap();
         let gh = config.github.unwrap();
         assert_eq!(gh.username, "bob");
         assert_eq!(gh.monthly_limit, 100.0);
-        assert_eq!(config.autostart_enabled, false);
+        assert!(!config.autostart_enabled);
         assert!(config.wsl.is_none());
     }
 
@@ -1613,8 +1997,14 @@ mod tests {
     fn test_combined_usage_data_without_copilot() {
         let combined = CombinedUsageData {
             claude: Some(UsageData {
-                five_hour: UsageMeter { utilization: 10.0, resets_at: None },
-                seven_day: UsageMeter { utilization: 20.0, resets_at: None },
+                five_hour: UsageMeter {
+                    utilization: 10.0,
+                    resets_at: None,
+                },
+                seven_day: UsageMeter {
+                    utilization: 20.0,
+                    resets_at: None,
+                },
                 seven_day_oauth_apps: None,
                 seven_day_opus: None,
                 seven_day_sonnet: None,
@@ -1751,6 +2141,50 @@ mod tests {
         assert!(is_token_expired(0));
     }
 
+    // ===== normalize_expires_at テスト =====
+
+    #[test]
+    fn test_normalize_expires_at_seconds() {
+        // 秒単位の値はミリ秒に変換される
+        assert_eq!(normalize_expires_at(1_740_000_000), 1_740_000_000_000);
+    }
+
+    #[test]
+    fn test_normalize_expires_at_milliseconds() {
+        // ミリ秒単位の値はそのまま
+        assert_eq!(normalize_expires_at(1_740_000_000_000), 1_740_000_000_000);
+    }
+
+    #[test]
+    fn test_normalize_expires_at_boundary_seconds() {
+        // 境界値: 9_999_999_999 は秒と判定
+        assert_eq!(normalize_expires_at(9_999_999_999), 9_999_999_999_000);
+    }
+
+    #[test]
+    fn test_normalize_expires_at_boundary_milliseconds() {
+        // 境界値: 10_000_000_000 はミリ秒と判定
+        assert_eq!(normalize_expires_at(10_000_000_000), 10_000_000_000);
+    }
+
+    #[test]
+    fn test_normalize_expires_at_zero() {
+        // 0 は秒と判定 → 0ミリ秒
+        assert_eq!(normalize_expires_at(0), 0);
+    }
+
+    #[test]
+    fn test_is_token_expired_seconds_format_future() {
+        // 遠い未来の秒単位 → expired ではない
+        assert!(!is_token_expired(4_102_444_800)); // 2100年 in seconds
+    }
+
+    #[test]
+    fn test_is_token_expired_seconds_format_past() {
+        // 過去の秒単位 → expired
+        assert!(is_token_expired(1_577_836_800)); // 2020年 in seconds
+    }
+
     // ===== parse_copilot_usage 追加テスト =====
 
     #[test]
@@ -1810,5 +2244,231 @@ mod tests {
             assert!(config.autostart_enabled);
         }
         // deny_unknown_fields の場合はエラーになっても OK
+    }
+
+    // ===== get_platform_info テスト =====
+
+    #[test]
+    fn test_get_platform_info_returns_valid_os() {
+        let info = get_platform_info();
+        assert_eq!(info.os, std::env::consts::OS);
+        assert!(!info.os.is_empty());
+    }
+
+    #[test]
+    fn test_get_platform_info_wsl_supported_matches_target() {
+        let info = get_platform_info();
+        assert_eq!(info.is_wsl_supported, cfg!(target_os = "windows"));
+    }
+
+    #[test]
+    fn test_platform_info_serialization() {
+        let info = PlatformInfo {
+            os: "windows".to_string(),
+            is_wsl_supported: true,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"os\":\"windows\""));
+        assert!(json.contains("\"is_wsl_supported\":true"));
+    }
+
+    // ===== validate_wsl_path() テスト =====
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_wsl_path_valid_backslash() {
+        let result =
+            validate_wsl_path(r"\\wsl.localhost\Ubuntu-24.04\home\user\.claude\.credentials.json");
+        assert!(result.is_ok());
+        assert!(result.unwrap().ends_with(".credentials.json"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_wsl_path_valid_forward_slash() {
+        let result =
+            validate_wsl_path("//wsl.localhost/Ubuntu/home/user/.claude/.credentials.json");
+        assert!(result.is_ok());
+        assert!(result.unwrap().ends_with(".credentials.json"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_wsl_path_invalid_prefix() {
+        let result = validate_wsl_path(r"C:\Users\user\.claude\.credentials.json");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("WSL path must start with"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_wsl_path_traversal_rejected() {
+        let result = validate_wsl_path(r"\\wsl.localhost\Ubuntu\..\..\..\etc\passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Path traversal detected"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_wsl_path_too_long() {
+        let long_segment = "a".repeat(600);
+        let long_path = format!(r"\\wsl.localhost\Ubuntu\home\{}", long_segment);
+        let result = validate_wsl_path(&long_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too long"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_wsl_path_wrong_suffix() {
+        let result = validate_wsl_path(r"\\wsl.localhost\Ubuntu\home\user\config.toml");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(".credentials.json"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_wsl_path_auto_append_from_claude_dir() {
+        // .claude ディレクトリパスの場合、.credentials.json が自動付与される
+        let result = validate_wsl_path(r"\\wsl.localhost\Ubuntu\home\user\.claude");
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(
+            path.ends_with(".credentials.json"),
+            "Expected .credentials.json suffix, got: {}",
+            path
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_wsl_path_empty_prefix_rejected() {
+        let result = validate_wsl_path("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("WSL path must start with"));
+    }
+
+    // ===== WSL cooldown テスト =====
+
+    #[test]
+    fn test_should_skip_wsl_initially_false() {
+        // 初期状態ではクールダウンは非アクティブ
+        // Note: static state は他のテストと共有されるため、明示クリアしてからテスト
+        clear_wsl_timeout();
+        assert!(!should_skip_wsl());
+    }
+
+    #[test]
+    fn test_record_and_check_wsl_timeout() {
+        // 他のテストとのグローバル状態共有による干渉を防ぐため初期化
+        clear_wsl_timeout();
+        // タイムアウトを記録した直後はスキップすべき
+        record_wsl_timeout();
+        assert!(should_skip_wsl());
+        // テスト後にクリーンアップ
+        clear_wsl_timeout();
+    }
+
+    #[test]
+    fn test_clear_wsl_timeout_resets() {
+        clear_wsl_timeout();
+        record_wsl_timeout();
+        assert!(should_skip_wsl());
+        clear_wsl_timeout();
+        assert!(!should_skip_wsl());
+    }
+
+    #[test]
+    fn test_wsl_cooldown_expired() {
+        clear_wsl_timeout();
+        // 過去のタイムスタンプ（WSL_COOLDOWN_SECS 以上前）を手動設定してクールダウン満了をテスト
+        if let Ok(mut guard) = wsl_cooldown_state().lock() {
+            *guard = Some(Instant::now() - std::time::Duration::from_secs(WSL_COOLDOWN_SECS + 1));
+        }
+        assert!(!should_skip_wsl());
+        // クリーンアップ
+        clear_wsl_timeout();
+    }
+
+    #[test]
+    fn test_wsl_cooldown_not_yet_expired() {
+        clear_wsl_timeout();
+        // クールダウン期間内のタイムスタンプを設定
+        if let Ok(mut guard) = wsl_cooldown_state().lock() {
+            *guard = Some(Instant::now() - std::time::Duration::from_secs(WSL_COOLDOWN_SECS - 5));
+        }
+        assert!(should_skip_wsl());
+        // クリーンアップ
+        clear_wsl_timeout();
+    }
+
+    // ===== S3: WSL cooldown integration flow test =====
+
+    #[test]
+    fn test_wsl_cooldown_integration_flow() {
+        clear_wsl_timeout();
+        // 1. record_wsl_timeout() でタイムアウトを記録
+        record_wsl_timeout();
+
+        // 2. should_skip_wsl() が true を返すことを確認
+        assert!(
+            should_skip_wsl(),
+            "should_skip_wsl() should be true after recording timeout"
+        );
+
+        // 3. clear_wsl_timeout() でクリア
+        clear_wsl_timeout();
+
+        // 4. should_skip_wsl() が false を返すことを確認
+        assert!(
+            !should_skip_wsl(),
+            "should_skip_wsl() should be false after clearing timeout"
+        );
+    }
+
+    // ===== S4: should_retry_wsl_on_startup tests =====
+
+    #[test]
+    fn test_should_retry_wsl_on_startup_wsl_config_and_no_usage() {
+        // WSL設定あり + Claude usage None → true
+        assert!(should_retry_wsl_on_startup(true, true));
+    }
+
+    #[test]
+    fn test_should_retry_wsl_on_startup_wsl_config_and_has_usage() {
+        // WSL設定あり + Claude usage Some → false
+        assert!(!should_retry_wsl_on_startup(true, false));
+    }
+
+    #[test]
+    fn test_should_retry_wsl_on_startup_no_wsl_config_and_no_usage() {
+        // WSL設定なし + Claude usage None → false
+        assert!(!should_retry_wsl_on_startup(false, true));
+    }
+
+    #[test]
+    fn test_should_retry_wsl_on_startup_no_wsl_config_and_has_usage() {
+        // WSL設定なし + Claude usage Some → false
+        assert!(!should_retry_wsl_on_startup(false, false));
+    }
+
+    // ===== WslReadError Display tests =====
+
+    #[test]
+    fn test_wsl_read_error_display_timeout() {
+        let err = WslReadError::Timeout;
+        assert_eq!(err.to_string(), "WSL file read timed out");
+    }
+
+    #[test]
+    fn test_wsl_read_error_display_io_error() {
+        let err = WslReadError::IoError("disk failure".to_string());
+        assert_eq!(err.to_string(), "I/O error: disk failure");
+    }
+
+    #[test]
+    fn test_wsl_read_error_display_not_found() {
+        let err = WslReadError::NotFound("missing file".to_string());
+        assert_eq!(err.to_string(), "Not found: missing file");
     }
 }
