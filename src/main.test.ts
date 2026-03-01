@@ -260,16 +260,16 @@ describe('main.ts', () => {
     it('should trigger refresh when session expired', async () => {
       mockInvoke.mockResolvedValue(undefined);
 
-      await mockInvoke('force_refresh');
+      await mockInvoke('force_refresh', { clearCooldown: false });
 
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
     });
 
     it('should handle refresh errors gracefully', async () => {
       mockInvoke.mockRejectedValue(new Error('Refresh failed'));
 
       try {
-        await mockInvoke('force_refresh');
+        await mockInvoke('force_refresh', { clearCooldown: false });
       } catch (error) {
         expect(error).toBeInstanceOf(Error);
       }
@@ -510,7 +510,7 @@ describe('main.ts', () => {
 
       await vi.advanceTimersByTimeAsync(10000);
 
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
     });
 
     it('calls force_refresh when copilot is expired', async () => {
@@ -524,7 +524,7 @@ describe('main.ts', () => {
 
       await vi.advanceTimersByTimeAsync(10000);
 
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
     });
 
     it('does not call force_refresh when refreshTriggered is already true', async () => {
@@ -534,12 +534,12 @@ describe('main.ts', () => {
       mockInvoke.mockResolvedValue(undefined);
 
       await vi.advanceTimersByTimeAsync(10000);
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
       mockInvoke.mockClear();
 
       // Second tick: refreshTriggered is true, so force_refresh should NOT be called
       await vi.advanceTimersByTimeAsync(10000);
-      expect(mockInvoke).not.toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).not.toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
     });
 
     it('resets refreshTriggered when force_refresh rejects', async () => {
@@ -549,7 +549,7 @@ describe('main.ts', () => {
 
       // First tick: force_refresh is called and rejects → catch resets refreshTriggered
       await vi.advanceTimersByTimeAsync(10000);
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
 
       // Flush the rejection handler microtask
       await vi.advanceTimersByTimeAsync(0);
@@ -558,7 +558,7 @@ describe('main.ts', () => {
 
       // Second tick: refreshTriggered was reset, so force_refresh should be called again
       await vi.advanceTimersByTimeAsync(10000);
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
     });
   });
 });

@@ -288,7 +288,7 @@ export function initContextMenu(): void {
   // Force refresh
   forceRefresh.addEventListener("click", async () => {
     try {
-      await invoke("force_refresh");
+      await invoke("force_refresh", { clearCooldown: true });
     } catch (e) {
       console.warn("Failed to force refresh:", e);
     }
@@ -357,7 +357,7 @@ export function initContextMenu(): void {
         monthlyLimit,
       });
       alert("GitHub token verified and saved successfully!");
-      await invoke("force_refresh");
+      await invoke("force_refresh", { clearCooldown: false });
     } catch (e) {
       alert(`Failed to save settings: ${e}`);
     }
@@ -416,7 +416,7 @@ export function initContextMenu(): void {
       } else {
         alert("WSL settings saved successfully!");
       }
-      await invoke("force_refresh");
+      await invoke("force_refresh", { clearCooldown: false });
     } catch (e) {
       alert(`Failed to save WSL settings: ${e}`);
     }
@@ -429,7 +429,7 @@ export function initContextMenu(): void {
       await invoke("clear_wsl_config");
       (getEl("wsl-credentials-path") as HTMLInputElement).value = "";
       alert("WSL settings cleared successfully!");
-      await invoke("force_refresh");
+      await invoke("force_refresh", { clearCooldown: false });
     } catch (e) {
       alert(`Failed to clear WSL settings: ${e}`);
     }

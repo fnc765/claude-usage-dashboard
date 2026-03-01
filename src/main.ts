@@ -106,7 +106,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     if ((sessionExpired || weeklyExpired || copilotExpired) && !refreshTriggered) {
       refreshTriggered = true;
-      invoke("force_refresh").catch(() => {
+      invoke("force_refresh", { clearCooldown: false }).catch(() => {
         refreshTriggered = false;
       });
     }

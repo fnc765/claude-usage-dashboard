@@ -318,7 +318,7 @@ describe('context-menu.ts', () => {
     it('should call force_refresh on force-refresh click', async () => {
       const forceRefresh = document.getElementById('force-refresh')!;
       forceRefresh.click();
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: true });
     });
 
     it('should call quit_app on quit click', async () => {
@@ -486,7 +486,7 @@ describe('context-menu.ts', () => {
         token: 'ghp_test123',
         monthlyLimit: 500,
       });
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
       expect(mockAlert).toHaveBeenCalledWith('GitHub token verified and saved successfully!');
     });
 
@@ -675,7 +675,7 @@ describe('context-menu.ts', () => {
       expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
         credentialsPath: validPath,
       });
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
       expect(mockAlert).toHaveBeenCalledWith('WSL settings saved successfully!');
     });
 
@@ -696,7 +696,7 @@ describe('context-menu.ts', () => {
       expect(mockInvoke).toHaveBeenCalledWith('save_wsl_config', {
         credentialsPath: validPath,
       });
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
       expect(mockAlert).toHaveBeenCalledWith(
         'WSL path saved with warnings:\nFile does not exist. WSL might not be running or path may be incorrect.',
       );
@@ -735,7 +735,7 @@ describe('context-menu.ts', () => {
       await new Promise(r => setTimeout(r, 0));
 
       expect(mockInvoke).toHaveBeenCalledWith('clear_wsl_config');
-      expect(mockInvoke).toHaveBeenCalledWith('force_refresh');
+      expect(mockInvoke).toHaveBeenCalledWith('force_refresh', { clearCooldown: false });
       expect((document.getElementById('wsl-credentials-path') as HTMLInputElement).value).toBe('');
       expect(mockAlert).toHaveBeenCalledWith('WSL settings cleared successfully!');
     });

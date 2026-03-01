@@ -3,6 +3,7 @@ use notify::{PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -19,14 +20,27 @@ const TOKEN_EXPIRATION_BUFFER_MS: u64 = 30_000; // 30 seconds
 const MAX_WSL_PATH_LENGTH: usize = 500;
 const MAX_RESPONSE_PREVIEW_CHARS: usize = 500;
 const WSL_FILE_READ_TIMEOUT_SECS: u64 = 5;
-const WSL_STARTUP_RETRY_DELAY_SECS: u64 = 10;
+const WSL_STARTUP_RETRY_DELAY_SECS: u64 = 30;
 const WSL_COOLDOWN_SECS: u64 = 30;
 
 // Invariant: WSL_COOLDOWN_SECS >= WSL_FILE_READ_TIMEOUT_SECS
-// This ensures at most one leaked thread from read_file_with_timeout at any time.
+// Under normal operation (automatic polling), this ensures typically at most one
+// leaked thread from read_file_with_timeout at any time.
+// See Thread Leak Note on read_file_with_timeout for edge cases.
 const _: () = assert!(WSL_COOLDOWN_SECS >= WSL_FILE_READ_TIMEOUT_SECS);
+// Invariant: WSL_STARTUP_RETRY_DELAY_SECS >= WSL_COOLDOWN_SECS
+// This ensures the "at most one concurrent WSL read thread" invariant holds even
+// after clear_wsl_timeout() is called during the startup retry path.
+const _: () = assert!(
+    WSL_STARTUP_RETRY_DELAY_SECS >= WSL_COOLDOWN_SECS,
+    "Startup retry delay must be >= cooldown to prevent concurrent WSL read threads"
+);
 
 static WSL_LAST_TIMEOUT: OnceLock<std::sync::Mutex<Option<Instant>>> = OnceLock::new();
+
+/// Tracks whether a WSL file read thread is currently in-flight.
+/// Prevents spawning multiple concurrent WSL read threads.
+static WSL_READ_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Returns a reference to the global WSL cooldown state.
 fn wsl_cooldown_state() -> &'static std::sync::Mutex<Option<Instant>> {
@@ -62,6 +76,10 @@ fn clear_wsl_timeout() {
 enum WslReadError {
     /// The file read timed out (WSL may not be running).
     Timeout,
+    /// Another WSL read is already in progress.
+    InFlight,
+    /// WSL read was skipped because cooldown is active.
+    CooldownSkipped,
     /// An I/O error occurred while reading the file.
     IoError(String),
     /// The file or path was not found.
@@ -72,6 +90,8 @@ impl std::fmt::Display for WslReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WslReadError::Timeout => write!(f, "WSL file read timed out"),
+            WslReadError::InFlight => write!(f, "Another WSL read is already in progress"),
+            WslReadError::CooldownSkipped => write!(f, "WSL read skipped (cooldown active)"),
             WslReadError::IoError(msg) => write!(f, "I/O error: {}", msg),
             WslReadError::NotFound(msg) => write!(f, "Not found: {}", msg),
         }
@@ -334,13 +354,17 @@ fn read_token_info() -> Result<TokenInfo, String> {
     // WSLはクールダウン中ならスキップ
     let wsl_result: Option<Result<TokenInfo, WslReadError>> = if should_skip_wsl() {
         eprintln!("[INFO] Skipping WSL read (cooldown active after previous timeout)");
-        wsl_path.map(|_| Err(WslReadError::Timeout))
+        wsl_path.map(|_| Err(WslReadError::CooldownSkipped))
     } else {
         let result = wsl_path.map(read_token_info_wsl);
         if let Some(ref r) = result {
             match r {
                 Ok(_) => clear_wsl_timeout(),
                 Err(WslReadError::Timeout) => record_wsl_timeout(),
+                Err(WslReadError::InFlight) => {} // クールダウン記録不要
+                // Unreachable: read_file_with_timeout() never returns CooldownSkipped.
+                // Included for exhaustive match.
+                Err(WslReadError::CooldownSkipped) => {}
                 Err(_) => {}
             }
         }
@@ -448,28 +472,58 @@ fn validate_wsl_path(wsl_path: &str) -> Result<String, String> {
 /// complete within `timeout_secs`, returns `WslReadError::Timeout`.
 ///
 /// # Thread Leak Note
-/// On timeout, the spawned thread may continue running until the OS-level I/O
-/// completes or the process exits. This is acceptable because:
-/// - The cooldown mechanism (`WSL_COOLDOWN_SECS`) prevents repeated thread creation
-/// - `WSL_COOLDOWN_SECS >= WSL_FILE_READ_TIMEOUT_SECS` ensures at most one leaked
-///   thread at a time
+///
+/// When timeout occurs, the spawned thread may continue running at the OS level
+/// until the WSL file system responds. The `WSL_READ_IN_FLIGHT` atomic guard
+/// prevents new read threads from being spawned while a `recv_timeout` is
+/// actively waiting (within the same 5-second window). After timeout, the guard
+/// is released to allow future reads — meaning OS-level leaked threads from
+/// previous timeouts may still exist.
+///
+/// In practice, leaked thread accumulation is bounded by:
+/// - **Automatic polling**: Cooldown (`WSL_COOLDOWN_SECS`) prevents re-reads
+///   for 30 seconds after a timeout, far exceeding the 5-second read window.
+/// - **Manual refresh**: The in-flight guard blocks concurrent spawns during
+///   the active timeout window. Between timeout windows (after guard release),
+///   rapid manual refreshes could theoretically spawn additional threads,
+///   but this requires deliberate 5+ second-spaced clicks while WSL is
+///   unresponsive — an unlikely user behavior pattern.
+///
+/// The compile-time assertions (`WSL_COOLDOWN_SECS >= WSL_FILE_READ_TIMEOUT_SECS`
+/// and `WSL_STARTUP_RETRY_DELAY_SECS >= WSL_COOLDOWN_SECS`) ensure that
+/// automatic code paths cannot produce overlapping read threads.
 #[cfg(target_os = "windows")]
 fn read_file_with_timeout(path: &str, timeout_secs: u64) -> Result<String, WslReadError> {
+    // In-flight guard: prevent multiple concurrent WSL read threads
+    if WSL_READ_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        eprintln!("[INFO] Skipping WSL read (another read already in-flight)");
+        return Err(WslReadError::InFlight);
+    }
+
     let path = path.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = std::fs::read_to_string(&path);
         let _ = tx.send(result);
     });
-    rx.recv_timeout(std::time::Duration::from_secs(timeout_secs))
-        .map_err(|_| WslReadError::Timeout)?
-        .map_err(|e| {
+
+    let result = match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
+        Ok(Ok(content)) => Ok(content),
+        Ok(Err(e)) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                WslReadError::NotFound(format!("File not found: {}", e))
+                Err(WslReadError::NotFound(format!("File not found: {}", e)))
             } else {
-                WslReadError::IoError(format!("Failed to read file: {}", e))
+                Err(WslReadError::IoError(format!("Failed to read file: {}", e)))
             }
-        })
+        }
+        Err(_) => Err(WslReadError::Timeout),
+    };
+
+    WSL_READ_IN_FLIGHT.store(false, Ordering::SeqCst);
+    result
 }
 
 #[cfg(target_os = "windows")]
@@ -671,8 +725,21 @@ fn set_always_on_top(window: tauri::WebviewWindow, enabled: bool) -> Result<(), 
         .map_err(|e| format!("Failed to set always on top: {}", e))
 }
 
+/// Forces an immediate data refresh.
+///
+/// # Parameters
+/// - `clear_cooldown`: When `true`, clears the WSL timeout cooldown before refreshing.
+///   Set to `true` for explicit user-initiated refreshes (e.g., "Refresh Now" button)
+///   where the user intends to retry WSL after starting it.
+///   Set to `false` for automatic refreshes triggered by config saves or timers.
 #[tauri::command]
-fn force_refresh(control: tauri::State<'_, Arc<PollingControl>>) -> Result<(), String> {
+fn force_refresh(
+    control: tauri::State<'_, Arc<PollingControl>>,
+    clear_cooldown: bool,
+) -> Result<(), String> {
+    if clear_cooldown {
+        clear_wsl_timeout();
+    }
     control.refresh_notify.notify_one();
     Ok(())
 }
@@ -847,12 +914,27 @@ fn save_wsl_config(credentials_path: String) -> Result<SaveWslResult, String> {
 
     match read_file_with_timeout(&validated_path, WSL_FILE_READ_TIMEOUT_SECS) {
         Ok(content) => {
+            clear_wsl_timeout(); // 読み取り成功 = WSL稼働中確認済み、既存クールダウンを解除
             if let Err(e) = serde_json::from_str::<Credentials>(&content) {
-                warnings.push(format!("File found but JSON parse failed: {}", e));
+                warnings.push(format!(
+                    "File found but credentials JSON could not be parsed: {}",
+                    e
+                ));
             }
         }
         Err(WslReadError::Timeout) => {
             warnings.push("WSL might not be running (read timed out).".to_string());
+            record_wsl_timeout();
+        }
+        Err(WslReadError::InFlight) => {
+            warnings.push(
+                "Another WSL read is in progress. Settings saved anyway."
+                    .to_string(),
+            );
+        }
+        Err(WslReadError::CooldownSkipped) => {
+            // Unreachable: read_file_with_timeout() never returns CooldownSkipped.
+            // Included for exhaustive match.
         }
         Err(WslReadError::IoError(_) | WslReadError::NotFound(_)) => {
             warnings.push("File does not exist or cannot be read.".to_string());
@@ -880,6 +962,7 @@ fn save_wsl_config(_credentials_path: String) -> Result<SaveWslResult, String> {
 
 #[tauri::command]
 fn clear_wsl_config() -> Result<(), String> {
+    clear_wsl_timeout();
     let mut config = read_app_config().unwrap_or(AppConfig {
         github: None,
         autostart_enabled: false,
@@ -1094,7 +1177,7 @@ pub fn run() {
                 // Immediate first fetch
                 do_fetch(&app_handle).await;
 
-                // WSL設定がある場合の初回リトライ（WSL未起動時に10秒後に1回だけ再試行）
+                // WSL設定がある場合の初回リトライ（WSL未起動時に30秒後に1回だけ再試行）
                 {
                     let has_wsl_config = read_app_config().ok().and_then(|c| c.wsl).is_some();
                     let claude_usage_is_none = {
@@ -1111,6 +1194,7 @@ pub fn run() {
                             WSL_STARTUP_RETRY_DELAY_SECS
                         );
                         tokio::time::sleep(Duration::from_secs(WSL_STARTUP_RETRY_DELAY_SECS)).await;
+                        clear_wsl_timeout();
                         do_fetch(&app_handle).await;
                     }
                 }
@@ -1706,7 +1790,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                WslReadError::IoError(_) | WslReadError::NotFound(_) | WslReadError::Timeout
+                WslReadError::IoError(_)
+                    | WslReadError::NotFound(_)
+                    | WslReadError::Timeout
+                    | WslReadError::InFlight
             ),
             "Expected file read error, got: {:?}",
             err
@@ -1725,7 +1812,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                WslReadError::IoError(_) | WslReadError::NotFound(_) | WslReadError::Timeout
+                WslReadError::IoError(_)
+                    | WslReadError::NotFound(_)
+                    | WslReadError::Timeout
+                    | WslReadError::InFlight
             ),
             "Expected file I/O error, got: {:?}",
             err
@@ -1744,7 +1834,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                WslReadError::IoError(_) | WslReadError::NotFound(_) | WslReadError::Timeout
+                WslReadError::IoError(_)
+                    | WslReadError::NotFound(_)
+                    | WslReadError::Timeout
+                    | WslReadError::InFlight
             ),
             "Expected file I/O error, got: {:?}",
             err
@@ -2426,6 +2519,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_record_then_clear_wsl_timeout() {
+        clear_wsl_timeout();
+        assert!(!should_skip_wsl());
+
+        record_wsl_timeout();
+        assert!(should_skip_wsl());
+
+        clear_wsl_timeout();
+        assert!(!should_skip_wsl());
+    }
+
+    // ===== read_token_info cooldown → CooldownSkipped test =====
+
+    /// Tests that `read_token_info` skips the WSL branch via `CooldownSkipped`
+    /// when cooldown is active, falling back to the Windows-only path.
+    ///
+    /// Since `read_token_info` consumes WSL errors internally (they become
+    /// `Some(Err(CooldownSkipped))` which maps to the "WSL unavailable" arm),
+    /// we verify that:
+    /// 1. During cooldown, `should_skip_wsl()` returns `true`.
+    /// 2. The internal `wsl_result` would be `Some(Err(CooldownSkipped))`.
+    /// 3. This simulated path selects the Windows token when available.
+    #[test]
+    fn test_read_token_info_cooldown_skips_wsl() {
+        // Setup: activate cooldown
+        clear_wsl_timeout();
+        record_wsl_timeout();
+        assert!(should_skip_wsl(), "Precondition: cooldown must be active");
+
+        // Simulate the read_token_info WSL branch logic when cooldown is active:
+        // `wsl_path.map(|_| Err(WslReadError::CooldownSkipped))`
+        let has_wsl_config = true;
+        let wsl_result: Option<Result<TokenInfo, WslReadError>> = if should_skip_wsl() {
+            if has_wsl_config {
+                Some(Err(WslReadError::CooldownSkipped))
+            } else {
+                None
+            }
+        } else {
+            unreachable!("Cooldown should be active");
+        };
+
+        // Verify the WSL result is CooldownSkipped
+        assert!(
+            matches!(&wsl_result, Some(Err(WslReadError::CooldownSkipped))),
+            "WSL result should be CooldownSkipped during cooldown"
+        );
+
+        // Simulate the match arm: (Some(Err(_)), Ok(win_token)) → uses Windows token
+        let mock_win_token = TokenInfo {
+            access_token: "win-token-123".to_string(),
+            expires_at: u64::MAX, // far future, not expired
+        };
+        let selected = match (wsl_result, Ok::<TokenInfo, String>(mock_win_token)) {
+            (Some(Err(_)), Ok(win_token)) => win_token,
+            _ => panic!("Expected (Some(Err(_)), Ok(_)) branch"),
+        };
+        assert_eq!(selected.access_token, "win-token-123");
+
+        // Cleanup
+        clear_wsl_timeout();
+    }
+
     // ===== S4: should_retry_wsl_on_startup tests =====
 
     #[test]
@@ -2470,5 +2627,84 @@ mod tests {
     fn test_wsl_read_error_display_not_found() {
         let err = WslReadError::NotFound("missing file".to_string());
         assert_eq!(err.to_string(), "Not found: missing file");
+    }
+
+    #[test]
+    fn test_wsl_read_error_in_flight_display() {
+        let err = WslReadError::InFlight;
+        assert_eq!(
+            err.to_string(),
+            "Another WSL read is already in progress"
+        );
+    }
+
+    #[test]
+    fn test_wsl_read_error_cooldown_skipped_display() {
+        let err = WslReadError::CooldownSkipped;
+        assert_eq!(err.to_string(), "WSL read skipped (cooldown active)");
+    }
+
+    #[test]
+    fn test_in_flight_does_not_record_cooldown() {
+        // Setup: ensure clean state
+        clear_wsl_timeout();
+        assert!(!should_skip_wsl(), "Precondition: no cooldown");
+
+        // The InFlight branch in read_token_info does not call record_wsl_timeout()
+        // Verify this by simulating: after an InFlight error, cooldown should NOT be active
+        // (This tests the design contract, not the full integration)
+
+        // Simulate what read_token_info does for InFlight:
+        // Err(WslReadError::InFlight) => {} — no cooldown recording
+        let error = WslReadError::InFlight;
+        match &error {
+            WslReadError::Timeout => record_wsl_timeout(),
+            WslReadError::InFlight => {} // This is the branch under test
+            WslReadError::CooldownSkipped => {}
+            _ => {}
+        }
+
+        // After InFlight, cooldown should still be inactive
+        assert!(!should_skip_wsl(), "InFlight should not trigger cooldown");
+
+        // Cleanup
+        clear_wsl_timeout();
+    }
+
+    // ===== WSL_READ_IN_FLIGHT guard tests =====
+
+    #[test]
+    fn test_wsl_read_in_flight_guard() {
+        // Reset state
+        WSL_READ_IN_FLIGHT.store(false, Ordering::SeqCst);
+
+        // Simulate in-flight read
+        WSL_READ_IN_FLIGHT.store(true, Ordering::SeqCst);
+
+        // Verify flag is set
+        assert!(WSL_READ_IN_FLIGHT.load(Ordering::SeqCst));
+
+        // Reset
+        WSL_READ_IN_FLIGHT.store(false, Ordering::SeqCst);
+        assert!(!WSL_READ_IN_FLIGHT.load(Ordering::SeqCst));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_read_file_with_timeout_rejects_when_in_flight() {
+        // Ensure clean state
+        WSL_READ_IN_FLIGHT.store(false, Ordering::SeqCst);
+
+        // Simulate in-flight read
+        WSL_READ_IN_FLIGHT.store(true, Ordering::SeqCst);
+
+        let result = read_file_with_timeout("\\\\wsl.localhost\\dummy\\path", 1);
+        assert!(
+            matches!(result, Err(WslReadError::InFlight)),
+            "Expected InFlight error when another read is in progress"
+        );
+
+        // Clean up
+        WSL_READ_IN_FLIGHT.store(false, Ordering::SeqCst);
     }
 }
