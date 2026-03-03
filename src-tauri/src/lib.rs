@@ -123,7 +123,8 @@ struct OAuthCredentials {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageMeter {
-    utilization: f64,
+    #[serde(default)]
+    utilization: Option<f64>,
     resets_at: Option<String>,
 }
 
@@ -132,7 +133,7 @@ struct ExtraUsage {
     is_enabled: bool,
     monthly_limit: f64,
     used_credits: f64,
-    utilization: f64,
+    utilization: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1466,7 +1467,7 @@ mod tests {
     #[test]
     fn test_usage_meter_serialization() {
         let meter = UsageMeter {
-            utilization: 45.5,
+            utilization: Some(45.5),
             resets_at: Some("2026-03-01T00:00:00Z".to_string()),
         };
 
@@ -1475,11 +1476,24 @@ mod tests {
         assert!(json.contains("2026-03-01T00:00:00Z"));
 
         let deserialized: UsageMeter = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.utilization, 45.5);
+        assert_eq!(deserialized.utilization, Some(45.5));
         assert_eq!(
             deserialized.resets_at,
             Some("2026-03-01T00:00:00Z".to_string())
         );
+    }
+
+    #[test]
+    fn test_usage_meter_utilization_null() {
+        // utilization が null の JSON をデシリアライズできる
+        let json = r#"{"utilization":null,"resets_at":"2026-03-01T00:00:00+00:00"}"#;
+        let deserialized: UsageMeter = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.utilization, None);
+
+        // utilization フィールドが欠落しても None として扱われる
+        let json_no_field = r#"{"resets_at":"2026-03-01T00:00:00+00:00"}"#;
+        let deserialized2: UsageMeter = serde_json::from_str(json_no_field).unwrap();
+        assert_eq!(deserialized2.utilization, None);
     }
 
     #[test]
@@ -1488,7 +1502,7 @@ mod tests {
             is_enabled: true,
             monthly_limit: 1000.0,
             used_credits: 250.0,
-            utilization: 25.0,
+            utilization: Some(25.0),
         };
 
         let json = serde_json::to_string(&extra).unwrap();
@@ -1497,7 +1511,25 @@ mod tests {
         assert!(deserialized.is_enabled);
         assert_eq!(deserialized.monthly_limit, 1000.0);
         assert_eq!(deserialized.used_credits, 250.0);
-        assert_eq!(deserialized.utilization, 25.0);
+        assert_eq!(deserialized.utilization, Some(25.0));
+    }
+
+    #[test]
+    fn test_extra_usage_utilization_null() {
+        // utilization が null の JSON をデシリアライズできる
+        let json = r#"{"is_enabled":true,"monthly_limit":5000,"used_credits":0.0,"utilization":null}"#;
+        let deserialized: ExtraUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.utilization, None);
+
+        // utilization が None の場合、null にシリアライズされる
+        let extra = ExtraUsage {
+            is_enabled: true,
+            monthly_limit: 5000.0,
+            used_credits: 0.0,
+            utilization: None,
+        };
+        let serialized = serde_json::to_string(&extra).unwrap();
+        assert!(serialized.contains("\"utilization\":null"), "Expected null, got: {}", serialized);
     }
 
     #[test]
@@ -1990,9 +2022,9 @@ mod tests {
             "seven_day": { "utilization": 20.0, "resets_at": "2026-03-01T00:00:00Z" }
         }"#;
         let data: UsageData = serde_json::from_str(json).unwrap();
-        assert_eq!(data.five_hour.utilization, 10.0);
+        assert_eq!(data.five_hour.utilization, Some(10.0));
         assert!(data.five_hour.resets_at.is_none());
-        assert_eq!(data.seven_day.utilization, 20.0);
+        assert_eq!(data.seven_day.utilization, Some(20.0));
         assert!(data.seven_day_oauth_apps.is_none());
         assert!(data.seven_day_opus.is_none());
         assert!(data.seven_day_sonnet.is_none());
@@ -2020,7 +2052,7 @@ mod tests {
         }"#;
         let data: UsageData = serde_json::from_str(json).unwrap();
         assert!(data.seven_day_oauth_apps.is_some());
-        assert_eq!(data.seven_day_oauth_apps.unwrap().utilization, 30.0);
+        assert_eq!(data.seven_day_oauth_apps.unwrap().utilization, Some(30.0));
         assert!(data.seven_day_opus.is_some());
         assert!(data.seven_day_sonnet.is_some());
         assert!(data.seven_day_cowork.is_some());
@@ -2028,6 +2060,7 @@ mod tests {
         let extra = data.extra_usage.unwrap();
         assert!(extra.is_enabled);
         assert_eq!(extra.monthly_limit, 500.0);
+        assert_eq!(extra.utilization, Some(20.0));
     }
 
     #[test]
@@ -2041,12 +2074,12 @@ mod tests {
     #[test]
     fn test_usage_meter_resets_at_none() {
         let meter = UsageMeter {
-            utilization: 0.0,
+            utilization: Some(0.0),
             resets_at: None,
         };
         let json = serde_json::to_string(&meter).unwrap();
         let deserialized: UsageMeter = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.utilization, 0.0);
+        assert_eq!(deserialized.utilization, Some(0.0));
         assert!(deserialized.resets_at.is_none());
     }
 
@@ -2091,11 +2124,11 @@ mod tests {
         let combined = CombinedUsageData {
             claude: Some(UsageData {
                 five_hour: UsageMeter {
-                    utilization: 10.0,
+                    utilization: Some(10.0),
                     resets_at: None,
                 },
                 seven_day: UsageMeter {
-                    utilization: 20.0,
+                    utilization: Some(20.0),
                     resets_at: None,
                 },
                 seven_day_oauth_apps: None,
@@ -2111,7 +2144,7 @@ mod tests {
         let deserialized: CombinedUsageData = serde_json::from_str(&json).unwrap();
         assert!(deserialized.copilot.is_none());
         assert!(deserialized.claude.is_some());
-        assert_eq!(deserialized.claude.unwrap().five_hour.utilization, 10.0);
+        assert_eq!(deserialized.claude.unwrap().five_hour.utilization, Some(10.0));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 import { USAGE_THRESHOLDS, TIME_WINDOWS, TIME_CONVERSION } from "./constants";
 
 export interface UsageMeter {
-  utilization: number;
+  utilization: number | null;
   resets_at: string | null;
 }
 
@@ -13,7 +13,7 @@ export interface ExtraUsage {
   is_enabled: boolean;
   monthly_limit: number;
   used_credits: number;
-  utilization: number;
+  utilization: number | null;
 }
 
 export interface UsageData {
@@ -229,7 +229,7 @@ export function updateWidget(data: CombinedUsageData) {
 
     updateBar(
       sessionElements,
-      data.claude.five_hour.utilization,
+      data.claude.five_hour.utilization ?? 0,
       sessionTimePercent,
       data.claude.five_hour.resets_at,
       "No active session",
@@ -237,7 +237,7 @@ export function updateWidget(data: CombinedUsageData) {
 
     updateBar(
       weeklyElements,
-      data.claude.seven_day.utilization,
+      data.claude.seven_day.utilization ?? 0,
       weeklyTimePercent,
       data.claude.seven_day.resets_at,
       "Awaiting reset",
